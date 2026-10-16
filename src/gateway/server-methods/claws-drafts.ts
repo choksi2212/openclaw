@@ -161,6 +161,7 @@ export const clawsDraftsHandlers: GatewayRequestHandlers = {
         params.content,
         params.expectedRevision,
         authority.assertCurrent,
+        { maxBytes: MAX_CLAW_DRAFT_BYTES },
       );
       if (result.status !== "updated") {
         throw new ClawProjectError(
