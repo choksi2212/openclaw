@@ -50,7 +50,6 @@ function cachedRosterCards(host: RosterHost) {
     textAvatar: card.textAvatar ?? null,
     activeNow: false,
     sessionCount: 0,
-    unreadCount: 0,
     lastActiveAt: 0,
     preview: undefined,
     assistantPreview: undefined,
