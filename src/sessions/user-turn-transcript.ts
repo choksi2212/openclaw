@@ -473,9 +473,7 @@ export function createUserTurnTranscriptRecorder(
           }
         }
         const appendedMedia = await persistMessage(lateMediaMessage, "none");
-        if (appendedMedia) {
-          persistedResult = appendedMedia;
-        }
+        persistedResult = appendedMedia ?? persistedResult;
         return appendedMedia;
       }
       if (runtimePersisted) {
@@ -548,6 +546,9 @@ export function createUserTurnTranscriptRecorder(
       withSessionInputActor(inputActorBinding, () => {
         staging ??= (async () => {
           const candidate = await resolveMessageForPersistence();
+          if (pendingInput) {
+            return pendingInput.state !== "consumed";
+          }
           const target = await resolveUserTurnTranscriptTarget(params.target);
           if (!candidate || !target || persistedResult || runtimePersisted) {
             return false;
