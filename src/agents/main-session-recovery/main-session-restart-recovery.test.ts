@@ -165,6 +165,7 @@ import { subagentRuns } from "../subagents/registry/subagent-registry-memory.js"
 import { registerHarnessCompletionRecoveryCases } from "./main-session-harness-completion.test-harness.js";
 import { registerParentRestartRecoveryCases } from "./main-session-parent-recovery.test-harness.js";
 import * as recoveryOwnerRelease from "./main-session-recovery-owner-release.js";
+import { registerReplayBoundaryRecoveryCases } from "./main-session-recovery-replay-boundary.test-harness.js";
 import {
   createRecoveryRuntimeFixture,
   runRecoveryCommandDuringStop,
@@ -208,6 +209,7 @@ import {
   scheduleRestartAbortedMainSessionRecoveryAfterOwnerRelease,
   scheduleRestartAbortedMainSessionRecovery as scheduleRestartAbortedMainSessionRecoveryBase,
 } from "./main-session-restart-recovery.js";
+import { registerTerminalApprovalRecoveryCases } from "./main-session-terminal-approval.test-harness.js";
 
 const transcriptMocks = vi.hoisted(() => ({
   appendAssistantMessageToSessionTranscript: vi.fn(),
@@ -1558,6 +1560,18 @@ describe("main-session-restart-recovery", () => {
   });
 
   registerHarnessCompletionRecoveryCases(getHarnessRecoveryFixture);
+  registerTerminalApprovalRecoveryCases({
+    stateDir: () => tmpDir,
+    makeControlUiRecoveryFixture,
+    writeTranscript,
+    expectRecovery,
+    gatewayParams,
+  });
+  registerReplayBoundaryRecoveryCases({
+    writePreparedMainSessionTranscript,
+    expectRecovery,
+    gatewayParams,
+  });
 
   it("delivers a resumed reply through hooks using the interrupted route", async () => {
     await withEnvAsync({ OPENCLAW_STATE_DIR: tmpDir }, async () => {
@@ -1687,7 +1701,7 @@ describe("main-session-restart-recovery", () => {
       to: "telegram:-100123",
       accountId: "work",
       threadId: 99,
-      text: "I'm continuing your interrupted request now (the gateway has just restarted).  Don't be concerned with the lack of typing; I am working behind the scenes and I'll send a message when I'm done!",
+      text: expect.stringContaining("Recovery did not grant new permission"),
       idempotencyKey: `main-session-restart-recovery:${String(gatewayParams().idempotencyKey)}:resumed-notice`,
     });
     expect(notice?.isCurrent?.({})).toBe(false);
@@ -2382,28 +2396,6 @@ describe("main-session-restart-recovery", () => {
 
     expect(result).toEqual({ started: 1, settled: 0, failed: 0, skipped: 0 });
     expect(gatewayParams().deliver).toBe(false);
-  });
-
-  it("resumes stale approval-pending exec tool results with restart-safe tools", async () => {
-    const sessionsDir = await writePreparedMainSessionTranscript([
-      makeUserMessage("run a command that needs approval"),
-      { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "exec" }] },
-      makeToolResultMessage("Approval required (id stale, full stale-approval-id).", {
-        details: {
-          status: "approval-pending",
-          approvalId: "stale-approval-id",
-          host: "gateway",
-          command: "echo stale",
-        },
-      }),
-    ]);
-
-    await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
-    expect(callGateway).toHaveBeenCalledOnce();
-    expect(gatewayParams()).toMatchObject({ forceRestartSafeTools: true });
-    const store = readStore(path.join(sessionsDir, "sessions.json"));
-    expect(store["agent:main:main"]?.status).toBeUndefined();
-    expect(store["agent:main:main"]?.abortedLastRun).toBe(false);
   });
 
   it("resumes safely when pending final delivery identities are missing", async () => {
