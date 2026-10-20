@@ -376,7 +376,7 @@ it.each(["persistent", "threaded", "stable", "tool-commit-failure", "cross-agent
           ],
         });
       }
-      const sendText = vi.fn(async (request: { to: string; threadId?: string | number }) => {
+      const sendText = vi.fn(async (request: { to: string; threadId?: string | number | null }) => {
         expect(request.to).toBe(mode === "threaded" ? "12345:topic:42" : "12345");
         expect(request.threadId).toBe(mode === "threaded" ? 42 : undefined);
         if (mode === "persistent") {

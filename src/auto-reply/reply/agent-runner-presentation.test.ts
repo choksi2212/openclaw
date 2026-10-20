@@ -109,7 +109,7 @@ it("strips split heartbeat tokens and preserves replacement partials", async () 
     { text: "HEARTBEAT_", delta: "HEARTBEAT_" },
     { text: "HEARTBEAT_OK", delta: "OK" },
     { text: "HEARTBEAT_OK details", delta: " details" },
-    { text: "replacement", delta: "", replace: true },
+    { text: "replacement", delta: "", replace: true as const },
   ]) {
     await presentation.presentPartialReply(payload, "embedded");
   }

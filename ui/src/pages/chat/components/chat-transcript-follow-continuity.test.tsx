@@ -173,9 +173,16 @@ it.each([
     ]);
   },
 );
-it.each([[0], [8], [50], [0, false], [8, false], [0, true, true]] as const)(
+it.each([
+  [0, true, false],
+  [8, true, false],
+  [50, true, false],
+  [0, false, false],
+  [8, false, false],
+  [0, true, true],
+] as const)(
   "follows typing growth only from the resting end (distance=%s, follow=%s, pending=%s)",
-  async (distance, followEnabled = true, nativePending = false) => {
+  async (distance, followEnabled, nativePending) => {
     const flushFrames = stubAnimationFrames();
     const { container, renderRows, rows } = await mountFollow(
       `typing-distance-${distance}`,

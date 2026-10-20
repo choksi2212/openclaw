@@ -54,7 +54,7 @@ describe("CodexAppServerEventProjector terminal errors", () => {
   const refusalDetails = (projector: Projector) =>
     fixture.result(projector).currentAttemptAssistant?.diagnostics?.[0]?.details;
   const review = (projector: Projector) => refusalDetails(projector)?.review;
-  const compactionEvents = (callback: ReturnType<typeof vi.fn>) =>
+  const compactionEvents = (callback: Parameters<typeof fixture.events>[0]) =>
     fixture.events(callback, "compaction");
   function compactionEvent(phase: "start" | "end", itemId: string, completed?: boolean) {
     return {

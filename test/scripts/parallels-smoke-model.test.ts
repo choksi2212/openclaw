@@ -98,6 +98,7 @@ const TS_PATHS = {
   hostServer: "scripts/e2e/parallels/host-server.ts",
   linux: "scripts/e2e/parallels/linux-smoke.ts",
   macos: "scripts/e2e/parallels/macos-smoke.ts",
+  npmUpdate: "scripts/e2e/parallels/npm-update-smoke.ts",
   parallelsVm: "scripts/e2e/parallels/parallels-vm.ts",
   windows: "scripts/e2e/parallels/windows-smoke.ts",
 };

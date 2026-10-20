@@ -125,6 +125,7 @@ export function registerWorkerGoalChatCases(
         agentHarnessId: "codex",
         modelSelectionLocked: true,
       }));
+      expect(getRegisteredAgentHarness("codex")?.harness.cloudPlacement?.mode).toBe("remote-exec");
       const placements = createWorkerSessionPlacementStore();
       context.workerSessionPlacementService = placements;
       const environment = {

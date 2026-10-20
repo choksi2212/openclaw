@@ -58,7 +58,7 @@ function fixture() {
     onTestFinished(() => retireSessionControllerInput(input));
     return input;
   };
-  const operation = (id = sessionId) => {
+  const operation = (id: string = sessionId) => {
     const result = createReplyOperation({
       sessionKey,
       sessionId: id,

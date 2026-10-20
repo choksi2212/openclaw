@@ -176,10 +176,12 @@ vi.mock("../../config/config.js", async () => {
   return { ...actual, getRuntimeConfig: mocks.getConfig };
 });
 
+// mock-isolation: inspect secret resolution requests without contacting an operator Gateway.
 vi.mock("../../cli/command-secret-gateway.js", () => ({
   resolveCommandSecretRefsViaGateway: mocks.resolveSecrets,
 }));
 
+// mock-isolation: use the synthetic channel credential paths defined by this fixture.
 vi.mock("../../cli/command-secret-targets.js", () => ({
   getScopedChannelsCommandSecretTargets: mocks.secretTargets,
 }));
@@ -199,17 +201,21 @@ vi.mock("./cron-tool.js", () => ({
 vi.mock("./gateway-tool.js", () => ({
   createGatewayTool: () => openClawToolsFactoryMocks.tool("gateway"),
 }));
+// mock-isolation: message discovery does not load image generation providers.
 vi.mock("./image-generate-tool.js", () => ({ createImageGenerateTool: () => null }));
+// mock-isolation: message discovery does not load image inspection providers.
 vi.mock("./image-tool.js", () => ({ createImageTool: () => null }));
 vi.mock("./manifest-capability-availability.js", () => ({
   hasSnapshotCapabilityAvailability: () => false,
   hasSnapshotProviderEnvAvailability: () => false,
   loadCapabilityMetadataSnapshot: () => ({ index: {}, plugins: [] }),
 }));
+// mock-isolation: message discovery does not load music generation providers.
 vi.mock("./music-generate-tool.js", () => ({ createMusicGenerateTool: () => null }));
 vi.mock("./nodes-tool.js", () => ({
   createNodesTool: () => openClawToolsFactoryMocks.tool("nodes"),
 }));
+// mock-isolation: message discovery does not load PDF inspection providers.
 vi.mock("./pdf-tool.js", () => ({ createPdfTool: () => null }));
 vi.mock("./session-status-tool.js", () => ({
   createSessionStatusTool: () => openClawToolsFactoryMocks.tool("session_status"),
@@ -232,7 +238,9 @@ vi.mock("./sessions-yield-tool.js", () => ({
 vi.mock("./subagents-tool.js", () => ({
   createSubagentsTool: () => openClawToolsFactoryMocks.tool("subagents"),
 }));
+// mock-isolation: provide only the TTS tool identity without loading speech providers.
 vi.mock("./tts-tool.js", () => ({ createTtsTool: () => openClawToolsFactoryMocks.tool("tts") }));
+// mock-isolation: message discovery does not load video generation providers.
 vi.mock("./video-generate-tool.js", () => ({ createVideoGenerateTool: () => null }));
 vi.mock("./web-tools.js", () => ({
   createWebFetchTool: () => openClawToolsFactoryMocks.tool("web_fetch"),

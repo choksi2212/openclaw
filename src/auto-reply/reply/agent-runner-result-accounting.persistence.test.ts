@@ -93,7 +93,7 @@ function createRecoveryFixture(
   const actor = createReplyRecoveryActorFixture({
     ...scope,
     getSessionId,
-    operation: context.replyOperation,
+    operation: lane === "followup" ? turn.operation : context.replyOperation,
   });
   return Object.assign(actor, {
     controller: createReplyRestartRecoveryClaimController({
@@ -109,7 +109,7 @@ function createRecoveryFixture(
       },
       acquireSessionActor: () => actor.acquireSessionActor(),
       admissionRunId,
-      executionRunId: context.runId,
+      executionRunId: lane === "followup" ? turn.runId : context.runId,
       lifecycleGeneration: getAgentEventLifecycleGeneration(),
       getSessionId,
       isRestartAbort: () => false,

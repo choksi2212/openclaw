@@ -6,12 +6,18 @@ import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const json = (file: string) => JSON.parse(fs.readFileSync(file, "utf8"));
-const variants = (
-  [
-    ["clawhub", "0.23.3", "8dc2d1dadd9c2423b87752c7fde83bf40018a30a46edb80166c43e458690f2b0"],
-    ["vercel", "63.1.2", "81a44227cdb0fdb14aeb166302ae0c44ccd91cd99ab9e19d95b507b53373bf74"],
-  ] as const
-).map(([name, version, hash]) => ({ name, version, hash }));
+const variants = [
+  {
+    name: "clawhub",
+    version: "0.23.3",
+    hash: "8dc2d1dadd9c2423b87752c7fde83bf40018a30a46edb80166c43e458690f2b0",
+  },
+  {
+    name: "vercel",
+    version: "63.1.2",
+    hash: "81a44227cdb0fdb14aeb166302ae0c44ccd91cd99ab9e19d95b507b53373bf74",
+  },
+] as const;
 
 function fixture(variant: (typeof variants)[number]) {
   const root = tempDirs.make("openclaw-pinned-cli-");

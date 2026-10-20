@@ -18,7 +18,7 @@ function mount(initial: unknown[]) {
       return container.textContent;
     },
     all,
-    one: <T extends Element = HTMLElement>(selector: string) =>
+    one: <T extends Element = HTMLElement>(selector: string): T | null =>
       container.querySelector<T>(selector),
     texts: (selector: string) => all(selector).map((entry) => entry.textContent?.trim()),
     update: (next: unknown[]) => {

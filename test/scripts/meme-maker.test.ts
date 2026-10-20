@@ -1,8 +1,8 @@
-import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { describe, expect, it } from "vitest";
 import templates from "../../skills/meme-maker/references/templates.json" with { type: "json" };
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
@@ -14,8 +14,10 @@ const { createTempDir } = createScriptTestHarness();
 const testNodeExecPath = resolveTestNodeExecPath();
 const skillRoot = path.resolve("skills/meme-maker");
 const scriptPath = path.join(skillRoot, "scripts/meme.mjs");
-const template = templates.find((entry) => entry.id === "always-has-been");
-assert(template);
+const template = expectDefined(
+  templates.find((entry) => entry.id === "always-has-been"),
+  "Expected the always-has-been template",
+);
 
 function renderFixture(format: "svg" | "png", isolated = false) {
   const root = createTempDir("openclaw-meme-maker-");

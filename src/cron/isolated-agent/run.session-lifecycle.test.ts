@@ -218,7 +218,7 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
       });
       const initialSessionEntry = accessor.loadSessionEntry(target);
       assert(initialSessionEntry, "Expected the persisted CLI parent before admission");
-      seedSession(target.sessionKey, initialSessionEntry, {
+      seedSession(target.sessionKey, makeCronSessionEntry(initialSessionEntry), {
         storePath: target.storePath,
         lifecycleRevision: "binding-revision",
       });

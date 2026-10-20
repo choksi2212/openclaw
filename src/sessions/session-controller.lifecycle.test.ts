@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { expect, it, vi } from "vitest";
 import { createDeferred, withinTest } from "../../test/helpers/promise.js";
 import { withPluginRuntimeGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
@@ -54,12 +55,12 @@ const waitOrPreempt = (policy: "wait" | "preempt") =>
 const turnOptions = (target: SessionTarget) => ({
   target,
   sessionKey: target.sessionKey,
-  sessionId: target.incarnation,
+  sessionId: expectDefined(target.incarnation, "Expected a session incarnation"),
 });
 function boundOperation(target: SessionTarget, bindAtCreation = false) {
   const operation = createReplyOperation({
     sessionKey: target.sessionKey,
-    sessionId: target.incarnation,
+    sessionId: expectDefined(target.incarnation, "Expected a session incarnation"),
     resetTriggered: false,
     ...(bindAtCreation ? { target } : {}),
   });

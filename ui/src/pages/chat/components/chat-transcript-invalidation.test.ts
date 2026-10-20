@@ -56,9 +56,9 @@ const msg = <Content>(role: string, content: Content, timestamp = 1_000, extra =
   timestamp,
   ...extra,
 });
-const find = <T extends Element = HTMLElement>(root: ParentNode, selector: string) =>
+const find = <T extends Element = HTMLElement>(root: ParentNode, selector: string): T | null =>
   root.querySelector<T>(selector);
-const required = <T extends Element = HTMLElement>(root: ParentNode, selector: string) =>
+const required = <T extends Element = HTMLElement>(root: ParentNode, selector: string): T =>
   expectDefined(find<T>(root, selector), selector);
 const click = (root: ParentNode, selector: string) =>
   required<HTMLButtonElement>(root, selector).click();
@@ -460,12 +460,21 @@ describe("chat transcript invalidation", () => {
     const paneId = "pane-session-items";
     const messagesA = [{ role: "assistant", content: "session A", timestamp: 1_000 }];
     const messagesB = [{ role: "assistant", content: "session B", timestamp: 2_000 }];
+    const stableInputs = {
+      paneId,
+      runId: null,
+      toolMessages: [],
+      streamSegments: [],
+      stream: null,
+      streamStartedAt: null,
+      showToolCalls: true,
+    };
     const buildSpy = vi.spyOn(chatThreadBuild, "buildChatItems");
     const build = (sessionKey: string, messages: unknown[]) =>
       buildCachedChatItems({
-        ...threadProps(paneId, sessionKey, messages),
-        runId: null,
-        showToolCalls: true,
+        ...stableInputs,
+        sessionKey,
+        messages,
       });
     const itemsA = build("agent:main:session-a", messagesA);
     resetTranscriptSession(paneId);

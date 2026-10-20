@@ -153,7 +153,7 @@ describe("spawn input ownership transfer", () => {
       get execution() {
         return execution;
       },
-      release() {
+      release(this: void) {
         releaseWriter.resolve();
         releaseExecution.resolve();
       },

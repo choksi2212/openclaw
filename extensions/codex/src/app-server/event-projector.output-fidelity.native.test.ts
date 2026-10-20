@@ -47,63 +47,65 @@ it(
     const callId = "read-source";
     const requests: JsonObject[] = [];
     const failures: unknown[] = [];
-    const server = http.createServer(async (request, response) => {
-      try {
-        let body = "";
-        request.setEncoding("utf8");
-        for await (const chunk of request) {
-          body += chunk;
-        }
-        if (request.method !== "POST" || request.url !== "/v1/responses") {
-          response.writeHead(404).end();
-          return;
-        }
-        expect(request.headers.authorization).toBeUndefined();
-        const parsed: unknown = JSON.parse(body);
-        if (!isJsonObject(parsed)) {
-          throw new Error("Expected a provider request object");
-        }
-        requests.push(parsed);
-        const item =
-          requests.length === 1
-            ? {
-                type: "function_call",
-                call_id: callId,
-                name: "exec_command",
-                arguments: JSON.stringify({
-                  cmd: "cat source.txt",
-                  shell: "/bin/sh",
-                  login: false,
-                  max_output_tokens: 24_000,
-                }),
-              }
-            : {
-                type: "message",
-                role: "assistant",
-                id: "answer",
-                content: [{ type: "output_text", text: "Source received." }],
-              };
-        const events = [
-          { type: "response.created", response: { id: `response-${requests.length}` } },
-          { type: "response.output_item.done", item },
-          {
-            type: "response.completed",
-            response: {
-              id: `response-${requests.length}`,
-              usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+    const server = http.createServer((request, response) => {
+      void (async () => {
+        try {
+          let body = "";
+          request.setEncoding("utf8");
+          for await (const chunk of request) {
+            body += chunk;
+          }
+          if (request.method !== "POST" || request.url !== "/v1/responses") {
+            response.writeHead(404).end();
+            return;
+          }
+          expect(request.headers.authorization).toBeUndefined();
+          const parsed: unknown = JSON.parse(body);
+          if (!isJsonObject(parsed)) {
+            throw new Error("Expected a provider request object");
+          }
+          requests.push(parsed);
+          const item =
+            requests.length === 1
+              ? {
+                  type: "function_call",
+                  call_id: callId,
+                  name: "exec_command",
+                  arguments: JSON.stringify({
+                    cmd: "cat source.txt",
+                    shell: "/bin/sh",
+                    login: false,
+                    max_output_tokens: 24_000,
+                  }),
+                }
+              : {
+                  type: "message",
+                  role: "assistant",
+                  id: "answer",
+                  content: [{ type: "output_text", text: "Source received." }],
+                };
+          const events = [
+            { type: "response.created", response: { id: `response-${requests.length}` } },
+            { type: "response.output_item.done", item },
+            {
+              type: "response.completed",
+              response: {
+                id: `response-${requests.length}`,
+                usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+              },
             },
-          },
-        ];
-        response.writeHead(200, { "Content-Type": "text/event-stream" });
-        response.end(
-          events
-            .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-            .join(""),
-        );
-      } catch (error) {
-        failures.push(error);
-        response.writeHead(500).end();
-      }
+          ];
+          response.writeHead(200, { "Content-Type": "text/event-stream" });
+          response.end(
+            events
+              .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+              .join(""),
+          );
+        } catch (error) {
+          failures.push(error);
+          response.writeHead(500).end();
+        }
+      })();
     });
     context.onTestFinished(async () => {
       server.closeAllConnections();

@@ -56,7 +56,10 @@ function observe<T>(pending: Promise<T>) {
   );
 }
 
-async function waitForStop(command: AgentCommandOpts, release: ReturnType<typeof createDeferred>) {
+async function waitForStop(
+  command: AgentCommandOpts,
+  release: ReturnType<typeof createDeferred<void>>,
+) {
   command.abortSignal!.addEventListener("abort", () => release.resolve(), { once: true });
   await release.promise;
   command.abortSignal!.throwIfAborted();
@@ -116,7 +119,11 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
       const observed = observe(f.dispatch());
       await consumed.promise;
       if (terminalFirst) {
-        const acquire = SubagentLifecycleController.prototype.acquireTerminalCompletionLock;
+        const acquire = vi.spyOn(
+          SubagentLifecycleController.prototype,
+          "acquireTerminalCompletionLock",
+        );
+        acquire.mockRestore();
         const lock = vi
           .spyOn(SubagentLifecycleController.prototype, "acquireTerminalCompletionLock")
           .mockImplementation(async function (this: SubagentLifecycleController, targetRunId) {

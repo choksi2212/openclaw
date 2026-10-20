@@ -142,6 +142,7 @@ async function sendUntilTerminal(
       event.type === "event" &&
       event.event === "chat" &&
       event.payload?.runId === runId &&
+      typeof event.payload?.state === "string" &&
       states.includes(event.payload?.state),
   );
   const [sent, settled] = await Promise.all([

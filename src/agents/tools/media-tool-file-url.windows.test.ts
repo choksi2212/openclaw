@@ -25,8 +25,10 @@ vi.mock("../../llm/stream.js", async () => {
   return { ...actual, complete: completeMock };
 });
 
+// mock-isolation: file URL tests must not register live provider streams.
 vi.mock("../provider-stream.js", () => ({ registerProviderStreamForModel: vi.fn() }));
 
+// mock-isolation: this fixture discovers only the built-in media tools, not installed plugins.
 vi.mock("../openclaw-plugin-tools.js", () => ({ resolveOpenClawPluginToolsForOptions: () => [] }));
 
 const { stubPdfToolInfra } = createPdfToolInfraStub(completeMock);

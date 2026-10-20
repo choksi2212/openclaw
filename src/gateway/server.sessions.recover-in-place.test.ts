@@ -126,6 +126,7 @@ async function fixture(
     }),
     removeChatRun: vi.fn(() => {
       runRemoved.resolve();
+      return undefined;
     }),
     trackExecution: async (run) => {
       const execution = Promise.resolve().then(run);

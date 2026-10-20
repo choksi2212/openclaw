@@ -399,7 +399,7 @@ describe("buildChildCompletionFindings", () => {
   });
 
   it("orders same-timestamp child completions by stable session identity", () => {
-    const [laterKey, earlierKey] = ["Z", "A"].map((name) =>
+    const children = ["Z", "A"].map((name) =>
       makeChild({
         childSessionKey: `agent:main:subagent:${name.toLowerCase()}`,
         task: `${name} task`,
@@ -408,8 +408,8 @@ describe("buildChildCompletionFindings", () => {
         execution: { endedAt: 2_000, outcome: { status: "ok" } },
       }),
     );
-    const forward = buildChildCompletionFindings([laterKey, earlierKey]);
-    const reverse = buildChildCompletionFindings([earlierKey, laterKey]);
+    const forward = buildChildCompletionFindings(children);
+    const reverse = buildChildCompletionFindings(children.toReversed());
     expect(forward).toBe(reverse);
     const sections = ["A", "Z"].map(
       (name, index) =>
