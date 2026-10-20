@@ -145,16 +145,17 @@ export async function loadStatePortDescriptor(
         );
       }
       assertOpenClawStateDatabaseForMaintenance(db, { pathname: "shared-state port source" });
-      const migrationRequired =
+      const needsPhaseColumn =
         tableHasColumn(db, "agent_deletion_journal", "agent_id") &&
         !tableHasColumn(db, "agent_deletion_journal", "phase");
-      const pendingColumns: Record<string, readonly string[]> = migrationRequired
+      const pendingColumns: Record<string, readonly string[]> = needsPhaseColumn
         ? { agent_deletion_journal: ["phase"] }
         : {};
-      if (migrationRequired) {
+      if (needsPhaseColumn) {
         inspectSqlitePortSchema(db, descriptor, pendingColumns);
       }
-      return { version, migrationRequired, pendingColumns };
+      // First-use columns are valid absent; porting completes them in its private copy.
+      return { version, migrationRequired: false, pendingColumns };
     },
     migrateSqliteSource(file, _version, assertCurrent) {
       using db = openNodeSqliteDatabase(file);
