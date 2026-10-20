@@ -10,11 +10,15 @@ const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const webhook = "https://discord.com/api/webhooks/123/synthetic-webhook-token";
 const jobsPath = "/repos/openclaw/openclaw/actions/runs/123/attempts/1/jobs?per_page=100&page=1";
 const releaseName = "Prepare and upload iOS release";
-const successfulJob = {
-  name: releaseName,
-  conclusion: "success",
-  steps: [{ name: releaseName, conclusion: "success" }],
-};
+type Step = { name: string; conclusion: string };
+const makeStep = (conclusion = "success", name = releaseName): Step => ({ name, conclusion });
+const job = (conclusion = "success", steps = [makeStep()], name = releaseName) => ({
+  name,
+  conclusion,
+  steps,
+});
+const successfulJob = job();
+const webhookPath = "/api/webhooks/123/synthetic-webhook-token?wait=true";
 type Reply = {
   body?: unknown;
   status?: number;
@@ -45,12 +49,10 @@ function evaluate(options: Options = {}) {
   const preload = join(root, "fetch.mjs");
   const platform = options.platform ?? "iOS";
   const uploadName = `Prepare and upload ${platform} release`;
-  const jobs = options.jobs ?? [
-    { ...successfulJob, name: uploadName, steps: [{ name: uploadName, conclusion: "success" }] },
-  ];
+  const jobs = options.jobs ?? [job("success", [makeStep("success", uploadName)], uploadName)];
   const responses = {
     [jobsPath]: { body: { total_count: jobs.length, jobs } },
-    "/api/webhooks/123/synthetic-webhook-token?wait=true": { body: { id: "456" } },
+    [webhookPath]: { body: { id: "456" } },
     ...options.responses,
   };
   writeFileSync(
@@ -127,6 +129,14 @@ globalThis.fetch = async (url, options = {}) => {
   };
 }
 
+function expectContent(result: ReturnType<typeof evaluate>, content: string) {
+  expect(result.posts[0]?.body?.content).toContain(content);
+}
+
+function expression(value: string, github: Record<string, unknown>) {
+  return runInNewContext(value.replace(/^\$\{\{\s*|\s*\}\}$/gu, ""), { github });
+}
+
 describe("scheduled mobile store release notifications", () => {
   it("keeps webhook credentials behind the scheduled-run guard and trusted default-branch checkout", () => {
     const workflow = parse(
@@ -148,9 +158,10 @@ describe("scheduled mobile store release notifications", () => {
         };
       };
     };
+    const { notify } = workflow.jobs;
     expect(workflow.on.workflow_run).toMatchObject({ types: ["completed"], branches: ["main"] });
     expect(workflow.permissions).toEqual({});
-    expect(workflow.jobs.notify.permissions).toEqual({ contents: "read", actions: "read" });
+    expect(notify.permissions).toEqual({ contents: "read", actions: "read" });
     const github = {
       sha: "a".repeat(40),
       repository: "openclaw/openclaw",
@@ -171,34 +182,26 @@ describe("scheduled mobile store release notifications", () => {
       ["workflow_dispatch", "iOS Store release (weekly)", false],
     ] as const) {
       expect(
-        runInNewContext(workflow.jobs.notify.if, {
-          github: {
-            ...github,
-            event: { workflow_run: { ...github.event.workflow_run, event, display_title } },
-          },
+        expression(notify.if, {
+          ...github,
+          event: { workflow_run: { ...github.event.workflow_run, event, display_title } },
         }),
       ).toBe(expected);
       if (expected) {
-        expect(
-          runInNewContext(workflow.jobs.notify.environment.replace(/^\$\{\{\s*|\s*\}\}$/gu, ""), {
-            github: { event: { workflow_run: { display_title } } },
-          }),
-        ).toBe(display_title.startsWith("iOS") ? "ios-store-release" : "android-store-release");
+        expect(expression(notify.environment, { event: { workflow_run: { display_title } } })).toBe(
+          display_title.startsWith("iOS") ? "ios-store-release" : "android-store-release",
+        );
       }
     }
-    const checkout = workflow.jobs.notify.steps.find((step) =>
-      step.uses?.startsWith("actions/checkout@"),
-    );
+    const checkout = notify.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
     expect(checkout?.with?.["persist-credentials"]).toBe(false);
     const ref = checkout?.with?.ref;
     expect(typeof ref).toBe("string");
-    expect(runInNewContext(String(ref).replace(/^\$\{\{\s*|\s*\}\}$/gu, ""), { github })).toBe(
-      github.sha,
-    );
-    const notify = workflow.jobs.notify.steps.find(
+    expect(expression(String(ref), github)).toBe(github.sha);
+    const send = notify.steps.find(
       (step) => step.run === "node scripts/github/mobile-store-release-notify.mjs",
     );
-    expect(notify?.env?.DISCORD_MOBILE_RELEASE_WEBHOOK_URL).toBe(
+    expect(send?.env?.DISCORD_MOBILE_RELEASE_WEBHOOK_URL).toBe(
       "${{ secrets.DISCORD_MOBILE_RELEASE_WEBHOOK_URL }}",
     );
   });
@@ -263,10 +266,8 @@ describe("scheduled mobile store release notifications", () => {
       `https://api.github.com${path}`,
       `https://api.github.com${path.replace("&page=1", "&page=2")}`,
     ]);
-    expect(result.posts[0]?.body?.content).toContain(
-      "✅ **iOS release uploaded successfully · Attempt 2**",
-    );
-    expect(result.posts[0]?.body?.content).toContain("/attempts/2)");
+    expectContent(result, "✅ **iOS release uploaded successfully · Attempt 2**");
+    expectContent(result, "/attempts/2)");
   });
 
   it.each([
@@ -285,16 +286,11 @@ describe("scheduled mobile store release notifications", () => {
     (conclusion, reason) => {
       const result = evaluate({
         run: { conclusion },
-        jobs: [
-          {
-            ...successfulJob,
-            conclusion: "failure",
-            steps: [{ name: releaseName, conclusion: "failure" }],
-          },
-        ],
+        jobs: [job("failure", [makeStep("failure")])],
       });
       expect(result.status, result.output).toBe(0);
-      expect(result.posts[0]?.body?.content).toContain(
+      expectContent(
+        result,
         `⚠️ **iOS release needs attention**\n${reason} Store acceptance is unconfirmed.`,
       );
       expect(result.posts[0]?.body?.flags).toBe(4);
@@ -303,7 +299,7 @@ describe("scheduled mobile store release notifications", () => {
 
   it.each([
     {
-      jobs: [{ ...successfulJob, conclusion: "skipped", steps: [] }],
+      jobs: [job("skipped", [])],
       detail: "The store release job was skipped. Upload was not started.",
     },
     {
@@ -312,7 +308,7 @@ describe("scheduled mobile store release notifications", () => {
         "The release outcome could not be confirmed. Check the run. Store acceptance is unconfirmed.",
     },
     {
-      jobs: [{ ...successfulJob, steps: [] }],
+      jobs: [job("success", [])],
       detail:
         "The release outcome could not be confirmed. Check the run. Store acceptance is unconfirmed.",
     },
@@ -320,9 +316,7 @@ describe("scheduled mobile store release notifications", () => {
     "does not mistake a successful workflow conclusion for a completed upload: $detail",
     ({ jobs, detail }) => {
       const result = evaluate({ jobs });
-      expect(result.posts[0]?.body?.content).toContain(
-        `⚠️ **iOS release needs attention**\n${detail}`,
-      );
+      expectContent(result, `⚠️ **iOS release needs attention**\n${detail}`);
     },
   );
 
@@ -330,15 +324,12 @@ describe("scheduled mobile store release notifications", () => {
     const result = evaluate({
       run: { conclusion: "failure" },
       jobs: [
-        {
-          name: "qualify / iPad",
-          conclusion: "failure",
-          steps: [{ name: "Run qualification", conclusion: "failure" }],
-        },
-        { ...successfulJob, conclusion: "skipped", steps: [] },
+        job("failure", [makeStep("failure", "Run qualification")], "qualify / iPad"),
+        job("skipped", []),
       ],
     });
-    expect(result.posts[0]?.body?.content).toContain(
+    expectContent(
+      result,
       "The workflow failed during Run qualification. The store release job was skipped; upload was not started.",
     );
   });
@@ -349,20 +340,17 @@ describe("scheduled mobile store release notifications", () => {
       const result = evaluate({
         run: { conclusion: "failure" },
         jobs: [
-          {
-            ...successfulJob,
-            conclusion: "failure",
-            steps: [
-              {
-                name: upload === "skipped" ? "Setup Ruby" : "Retain release plan and notes",
-                conclusion: "failure",
-              },
-              { name: releaseName, conclusion: upload },
-            ],
-          },
+          job("failure", [
+            makeStep(
+              "failure",
+              upload === "skipped" ? "Setup Ruby" : "Retain release plan and notes",
+            ),
+            makeStep(upload),
+          ]),
         ],
       });
-      expect(result.posts[0]?.body?.content).toContain(
+      expectContent(
+        result,
         upload === "skipped"
           ? "The workflow failed during Setup Ruby. Upload was not started."
           : "Build uploaded. The workflow failed during Retain release plan and notes.",
@@ -376,7 +364,8 @@ describe("scheduled mobile store release notifications", () => {
     });
     expect(result.status, result.output).toBe(0);
     expect(result.waits).toEqual([1_000, 2_000]);
-    expect(result.posts[0]?.body?.content).toContain(
+    expectContent(
+      result,
       "⚠️ **iOS release needs attention**\nRelease job details could not be retrieved.",
     );
     expect(result.output).not.toContain(webhook);
@@ -385,7 +374,7 @@ describe("scheduled mobile store release notifications", () => {
   it("retries network errors and honors Discord rate limiting without rerunning a release", () => {
     const result = evaluate({
       responses: {
-        "/api/webhooks/123/synthetic-webhook-token?wait=true": [
+        [webhookPath]: [
           { error: `Failed to fetch ${webhook}` },
           { status: 429, body: { retry_after: 2.5 } },
           { body: { id: "456" } },
@@ -407,7 +396,7 @@ describe("scheduled mobile store release notifications", () => {
     { error: `Network failure at ${webhook}` },
   ])("fails notification delivery without exposing webhook credentials: %j", (reply) => {
     const result = evaluate({
-      responses: { "/api/webhooks/123/synthetic-webhook-token?wait=true": reply },
+      responses: { [webhookPath]: reply },
     });
     expect(result.status).toBe(1);
     expect(result.posts.length).toBeLessThanOrEqual(3);

@@ -47,6 +47,18 @@ function command(
   return result.stdout.trim();
 }
 
+function bash(
+  source: string,
+  env: NodeJS.ProcessEnv,
+  options: { cwd?: string; timeout?: number } = {},
+) {
+  return spawnSync("/bin/bash", ["-c", source], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    ...options,
+  });
+}
+
 function git(cwd: string, ...args: string[]): string {
   return command("/usr/bin/git", args, { cwd });
 }
@@ -77,12 +89,35 @@ function readOutputs(file: string): Record<string, string> {
   );
 }
 
+function readText(...parts: string[]): string {
+  return fs.readFileSync(path.join(...parts), "utf8");
+}
+
+function expectContains(value: string | undefined, ...fragments: string[]): void {
+  for (const fragment of fragments) {
+    expect(value).toContain(fragment);
+  }
+}
+
+function stepIndex(steps: WorkflowStep[], name: string): number {
+  return steps.findIndex((step) => step.name === name);
+}
+
+function releaseSteps(file: string): WorkflowStep[] {
+  const workflow = parse(readText(file)) as { jobs: { release: { steps: WorkflowStep[] } } };
+  return workflow.jobs.release.steps;
+}
+
+function shell(...lines: string[]): string {
+  return ["#!/bin/bash", "set -euo pipefail", ...lines, ""].join("\n");
+}
+
 function evaluateWorkflowExpression(expression: string, context: Record<string, unknown>): unknown {
   return runInNewContext(expression.replace(/^\$\{\{\s*|\s*\}\}$/gu, ""), context);
 }
 
 function releaseArtifactFiles(workflowFile: string, artifactPrefix: string, runnerTemp: string) {
-  const workflow = parse(fs.readFileSync(workflowFile, "utf8")) as {
+  const workflow = parse(readText(workflowFile)) as {
     jobs: {
       release: {
         steps: Array<{
@@ -135,18 +170,7 @@ describe("mobile release CI tools", () => {
   ];
   describe.each(releasePlatforms)("$platform release artifact recovery", ({ workflow }) => {
     it("checks out and verifies the dispatch commit before accessing signing credentials", () => {
-      const config = parse(fs.readFileSync(workflow, "utf8")) as {
-        jobs: {
-          release: {
-            steps: Array<{
-              uses?: string;
-              run?: string;
-              with?: Record<string, unknown>;
-            }>;
-          };
-        };
-      };
-      const steps = config.jobs.release.steps;
+      const steps = releaseSteps(workflow);
       expect(steps[0]).toMatchObject({
         uses: expect.stringMatching(/^actions\/checkout@/u),
         with: { ref: "${{ github.sha }}", "fetch-depth": 0 },
@@ -284,7 +308,7 @@ describe("mobile release CI tools", () => {
 
   it("keeps the Android emulator diagnostic manual, exact-SHA-bound, and secretless", async () => {
     const file = ".github/workflows/android-emulator-diagnostic.yml";
-    const source = fs.readFileSync(file, "utf8");
+    const source = readText(file);
     const workflow = parse(source) as {
       jobs: {
         "validate-target": {
@@ -322,38 +346,21 @@ describe("mobile release CI tools", () => {
     const validationSteps = validationJob.steps;
     const job = workflow.jobs.diagnose;
     const steps = job.steps;
-    const validateIndex = validationSteps.findIndex((step) => step.name === "Validate target SHA");
-    const validationTrustedCheckoutIndex = validationSteps.findIndex(
-      (step) => step.name === "Checkout trusted Android tooling",
+    const validateIndex = stepIndex(validationSteps, "Validate target SHA");
+    const validationTrustedCheckoutIndex = stepIndex(
+      validationSteps,
+      "Checkout trusted Android tooling",
     );
-    const checkoutIndex = validationSteps.findIndex(
-      (step) => step.name === "Checkout exact target",
-    );
-    const headIndex = validationSteps.findIndex(
-      (step) => step.name === "Verify exact target checkout",
-    );
-    const parityIndex = validationSteps.findIndex(
-      (step) => step.name === "Verify Android toolchain action parity",
-    );
-    const initializeIndex = steps.findIndex(
-      (step) => step.name === "Initialize Android emulator diagnostic",
-    );
-    const trustedCheckoutIndex = steps.findIndex(
-      (step) => step.name === "Checkout trusted Android tooling",
-    );
-    const setupIndex = steps.findIndex((step) => step.name === "Setup Android toolchain");
-    const toolingIndex = steps.findIndex(
-      (step) => step.name === "Prepare trusted Linux Android tooling",
-    );
-    const kvmIndex = steps.findIndex(
-      (step) => step.name === "Collect Linux KVM acceleration proof",
-    );
-    const diagnosticIndex = steps.findIndex(
-      (step) => step.name === "Run phone emulator diagnostic",
-    );
-    const artifactIndex = steps.findIndex(
-      (step) => step.name === "Upload Android emulator diagnostic",
-    );
+    const checkoutIndex = stepIndex(validationSteps, "Checkout exact target");
+    const headIndex = stepIndex(validationSteps, "Verify exact target checkout");
+    const parityIndex = stepIndex(validationSteps, "Verify Android toolchain action parity");
+    const initializeIndex = stepIndex(steps, "Initialize Android emulator diagnostic");
+    const trustedCheckoutIndex = stepIndex(steps, "Checkout trusted Android tooling");
+    const setupIndex = stepIndex(steps, "Setup Android toolchain");
+    const toolingIndex = stepIndex(steps, "Prepare trusted Linux Android tooling");
+    const kvmIndex = stepIndex(steps, "Collect Linux KVM acceleration proof");
+    const diagnosticIndex = stepIndex(steps, "Run phone emulator diagnostic");
+    const artifactIndex = stepIndex(steps, "Upload Android emulator diagnostic");
 
     expect(workflow.name).toBe("Android Emulator Diagnostic");
     expect(workflow["run-name"]).toBe(
@@ -402,22 +409,15 @@ describe("mobile release CI tools", () => {
     expect(steps[initializeIndex]?.env).toEqual({
       TARGET_SHA: "${{ inputs.target_sha }}",
     });
-    expect(steps[initializeIndex]?.run).toContain(
+    expectContains(
+      steps[initializeIndex]?.run,
       'DIAGNOSTIC_DIR="$RUNNER_TEMP/android-emulator-diagnostic"',
-    );
-    expect(steps[initializeIndex]?.run).toContain(
       'echo "DIAGNOSTIC_DIR=$DIAGNOSTIC_DIR" >>"$GITHUB_ENV"',
-    );
-    expect(steps[initializeIndex]?.run).toContain(
       "printf 'host_cpu=%s\\n' \"$(awk -F: '/^model name/",
-    );
-    expect(steps[initializeIndex]?.run).toContain(
       "printf 'host_logical_cpus=%s\\n' \"$(getconf _NPROCESSORS_ONLN)\"",
-    );
-    expect(steps[initializeIndex]?.run).toContain(
       "printf 'host_memory_bytes=%s\\n' \"$(awk '/^MemTotal:/",
+      "cat /etc/os-release",
     );
-    expect(steps[initializeIndex]?.run).toContain("cat /etc/os-release");
     expect(validationSteps[validationTrustedCheckoutIndex]).toMatchObject({
       uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       with: {
@@ -464,21 +464,20 @@ describe("mobile release CI tools", () => {
     expect(JSON.stringify(steps)).not.toContain("candidate/");
 
     const tooling = steps[toolingIndex]?.run ?? "";
-    expect(tooling).toContain(
+    expectContains(
+      tooling,
       'test "$(git -C "$trusted_root" rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"',
-    );
-    expect(tooling).toContain('adapter_path="scripts/android-sips-linux.sh"');
-    expect(tooling).toContain('git -C "$trusted_root" cat-file blob "$adapter_oid" >"$adapter"');
-    expect(tooling).toContain('cmp -s "$trusted_root/$adapter_path" "$adapter"');
-    expect(tooling).toContain('"$adapter" -s format jpeg -s formatOptions best');
-    expect(tooling).toContain("for dimensions in 1440x2560 454x454; do");
-    expect(tooling).toContain(
+      'adapter_path="scripts/android-sips-linux.sh"',
+      'git -C "$trusted_root" cat-file blob "$adapter_oid" >"$adapter"',
+      'cmp -s "$trusted_root/$adapter_path" "$adapter"',
+      '"$adapter" -s format jpeg -s formatOptions best',
+      "for dimensions in 1440x2560 454x454; do",
       '"$smoke_dir/input-${dimensions}.png" --out "$smoke_dir/output-${dimensions}.jpg"',
     );
     expect(tooling).not.toContain("candidate/");
 
     const toolchainAction = parse(
-      fs.readFileSync(".github/actions/setup-android-toolchain/action.yml", "utf8"),
+      readText(".github/actions/setup-android-toolchain/action.yml"),
     ) as { runs: { steps: Array<{ name: string; run?: string }> } };
     const kvmSetup = toolchainAction.runs.steps.find(
       (step) => step.name === "Configure Linux KVM acceleration",
@@ -502,14 +501,11 @@ describe("mobile release CI tools", () => {
       };
       const timeout = executable(
         "timeout",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
+        shell(
           'if [[ "${KVM_TIMEOUT_MODE:-run}" == "timeout" ]]; then exit 124; fi',
           "shift 3",
           'exec "$@"',
-          "",
-        ].join("\n"),
+        ),
       );
       const sudo = executable("sudo", '#!/bin/bash\nexec "$@"\n');
       const udevadm = executable(
@@ -526,36 +522,31 @@ describe("mobile release CI tools", () => {
         .replaceAll("/usr/bin/stat", stat)
         .replaceAll("/etc/udev/rules.d/99-openclaw-android-kvm.rules", rule)
         .replaceAll("/dev/kvm", "/dev/null");
-      const result = spawnSync(
-        "/bin/bash",
-        ["-c", [body, 'printf "boot-or-signing\\n" >"$KVM_SENTINEL"'].join("\n")],
+      const result = bash(
+        [body, 'printf "boot-or-signing\\n" >"$KVM_SENTINEL"'].join("\n"),
         {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            KVM_SENTINEL: sentinel,
-            KVM_TIMEOUT_MODE: timeoutMode,
-            KVM_UDEV_TRACE: udevTrace,
-            PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-            RUNNER_OS: "Linux",
-            RUNNER_ARCH: "X64",
-            RUNNER_TEMP: root,
-          },
-          timeout: 5_000,
+          KVM_SENTINEL: sentinel,
+          KVM_TIMEOUT_MODE: timeoutMode,
+          KVM_UDEV_TRACE: udevTrace,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+          RUNNER_OS: "Linux",
+          RUNNER_ARCH: "X64",
+          RUNNER_TEMP: root,
         },
+        { timeout: 5_000 },
       );
-      return { output: fs.readFileSync(output, "utf8"), result, root, rule, sentinel, udevTrace };
+      return { output: readText(output), result, root, rule, sentinel, udevTrace };
     };
 
     const usableKvm = runKvmFixture(
       "#!/bin/bash\nprintf 'KVM (version 12) is installed and usable.\\n'\n",
     );
     expect(usableKvm.result.status, usableKvm.result.stderr).toBe(0);
-    expect(fs.readFileSync(usableKvm.sentinel, "utf8")).toBe("boot-or-signing\n");
-    expect(fs.readFileSync(usableKvm.rule, "utf8")).toBe(
+    expect(readText(usableKvm.sentinel)).toBe("boot-or-signing\n");
+    expect(readText(usableKvm.rule)).toBe(
       `SUBSYSTEM=="misc", KERNEL=="kvm", OWNER="${process.getuid?.()}", GROUP="kvm", MODE="0660"\n`,
     );
-    expect(fs.readFileSync(usableKvm.udevTrace, "utf8").trim().split("\n")).toEqual([
+    expect(readText(usableKvm.udevTrace).trim().split("\n")).toEqual([
       "control --reload-rules",
       "trigger --action=change --subsystem-match=misc --sysname-match=kvm",
       "settle --timeout=15",
@@ -566,9 +557,7 @@ describe("mobile release CI tools", () => {
     command("/bin/bash", ["-c", steps[kvmIndex]?.run ?? ""], {
       env: { ...process.env, RUNNER_TEMP: usableKvm.root, DIAGNOSTIC_DIR: kvmDiagnosticDir },
     });
-    expect(fs.readFileSync(path.join(kvmDiagnosticDir, "emulator-kvm-check.txt"), "utf8")).toBe(
-      usableKvm.output,
-    );
+    expect(readText(kvmDiagnosticDir, "emulator-kvm-check.txt")).toBe(usableKvm.output);
 
     const unavailableKvm = runKvmFixture(
       "#!/bin/bash\nprintf 'acceleration unavailable\\n'\nexit 7\n",
@@ -584,8 +573,7 @@ describe("mobile release CI tools", () => {
 
     const timedOutKvm = runKvmFixture("#!/bin/bash\nexit 99\n", "timeout");
     expect(timedOutKvm.result.status).not.toBe(0);
-    expect(timedOutKvm.output).toContain("exit_status=124");
-    expect(timedOutKvm.output).toContain("timed_out=true");
+    expectContains(timedOutKvm.output, "exit_status=124", "timed_out=true");
     expect(fs.existsSync(timedOutKvm.sentinel)).toBe(false);
 
     const parityScript = validationSteps[parityIndex]?.run ?? "";
@@ -622,25 +610,20 @@ describe("mobile release CI tools", () => {
       commit(trusted, "trusted action");
       commit(target, "candidate action");
 
-      const result = spawnSync(
-        "/bin/bash",
-        ["-c", `${parityScript}\nprintf 'setup\\n' >"$SETUP_SENTINEL"\n`],
+      const result = bash(
+        `${parityScript}\nprintf 'setup\\n' >"$SETUP_SENTINEL"\n`,
         {
-          cwd: root,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            RUNNER_TEMP: runnerTemp,
-            SETUP_SENTINEL: sentinel,
-          },
+          RUNNER_TEMP: runnerTemp,
+          SETUP_SENTINEL: sentinel,
         },
+        { cwd: root },
       );
       return { result, sentinel };
     };
 
     const matching = runParityGate("matching");
     expect(matching.result.status, matching.result.stderr).toBe(0);
-    expect(fs.readFileSync(matching.sentinel, "utf8")).toBe("setup\n");
+    expect(readText(matching.sentinel)).toBe("setup\n");
     for (const candidate of ["modified", "symlink"] as const) {
       const rejected = runParityGate(candidate);
       expect(rejected.result.status).not.toBe(0);
@@ -648,24 +631,17 @@ describe("mobile release CI tools", () => {
     }
 
     const diagnostic = steps[diagnosticIndex]?.run ?? "";
-    expect(diagnostic).toContain(
+    expectContains(
+      diagnostic,
       'printf \'no\\n\' | avdmanager create avd --force --name "$AVD_NAME" --package "$SYSTEM_IMAGE" --device "$DEVICE_PROFILE"',
-    );
-    expect(diagnostic).toContain(
       'emulator_args=(-avd "$AVD_NAME" -no-window -no-audio -no-boot-anim -verbose -show-kernel)',
-    );
-    expect(diagnostic).toContain("accel_check_timeout_seconds=10");
-    expect(diagnostic).toContain(
+      "accel_check_timeout_seconds=10",
       'head -c 16384 "$accel_raw" >"$DIAGNOSTIC_DIR/emulator-accel-check.txt"',
-    );
-    expect(diagnostic).toContain("sample_owned_qemu() {");
-    expect(diagnostic).toContain(
+      "sample_owned_qemu() {",
       'printf \'\\n[%s] owned_emulator_pid=%s\\n\' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$emulator_pid"',
-    );
-    expect(diagnostic).toContain(
       'ps -p "$emulator_pid" -o pid=,ppid=,%cpu=,rss=,stat=,etime=,command=',
+      '>>"$DIAGNOSTIC_DIR/owned-qemu-samples.log" 2>&1',
     );
-    expect(diagnostic).toContain('>>"$DIAGNOSTIC_DIR/owned-qemu-samples.log" 2>&1');
     expect(diagnostic.match(/\bsample_owned_qemu\b/gu)).toHaveLength(5);
 
     const accelFunctionStart = diagnostic.indexOf("capture_accel_check() {");
@@ -682,42 +658,35 @@ describe("mobile release CI tools", () => {
       fs.mkdirSync(bin);
       fs.mkdirSync(diagnosticDir);
       fs.writeFileSync(path.join(bin, "emulator"), emulatorSource, { mode: 0o755 });
-      const result = spawnSync(
-        "/bin/bash",
-        ["-c", `set -euo pipefail\n${accelFunction}\ncapture_accel_check\n`],
+      const result = bash(
+        `set -euo pipefail\n${accelFunction}\ncapture_accel_check\n`,
         {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            DIAGNOSTIC_DIR: diagnosticDir,
-            PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-          },
-          timeout: 7_000,
+          DIAGNOSTIC_DIR: diagnosticDir,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
         },
+        { timeout: 7_000 },
       );
       return {
-        output: fs.readFileSync(path.join(diagnosticDir, "emulator-accel-check.txt"), "utf8"),
+        output: readText(diagnosticDir, "emulator-accel-check.txt"),
         result,
       };
     };
 
     const nonzeroAccel = runAccelCheck("#!/bin/bash\nprintf 'unavailable\\n'\nexit 7\n");
     expect(nonzeroAccel.result.status, nonzeroAccel.result.stderr).toBe(0);
-    expect(nonzeroAccel.output).toContain("unavailable");
-    expect(nonzeroAccel.output).toContain("exit_status=7");
-    expect(nonzeroAccel.output).toContain("timed_out=false");
+    expectContains(nonzeroAccel.output, "unavailable", "exit_status=7", "timed_out=false");
 
     const timedOutAccel = runAccelCheck("#!/bin/bash\nexec sleep 30\n");
     expect(timedOutAccel.result.status, timedOutAccel.result.stderr).toBe(0);
-    expect(timedOutAccel.output).toContain("exit_status=124");
-    expect(timedOutAccel.output).toContain("timed_out=true");
+    expectContains(timedOutAccel.output, "exit_status=124", "timed_out=true");
 
-    expect(diagnostic).toContain("final_cold_boot_observation_seconds=900");
-    expect(diagnostic).toContain("probe_timeout_seconds=5");
-    expect(diagnostic).toContain("final_snapshot_lead_seconds=15");
-    expect(diagnostic).toContain("snapshot_properties_max_bytes=65536");
-    expect(diagnostic).toContain("snapshot_logcat_max_bytes=262144");
-    expect(diagnostic).toContain(
+    expectContains(
+      diagnostic,
+      "final_cold_boot_observation_seconds=900",
+      "probe_timeout_seconds=5",
+      "final_snapshot_lead_seconds=15",
+      "snapshot_properties_max_bytes=65536",
+      "snapshot_logcat_max_bytes=262144",
       "emulator_observation_deadline=$((emulator_launch_seconds + final_cold_boot_observation_seconds))",
     );
     expect(diagnostic).not.toContain("post_deadline_observation_seconds");
@@ -804,11 +773,8 @@ describe("mobile release CI tools", () => {
       const snapshotsRoot = path.join(diagnosticDir, "cold-boot-snapshots");
       return {
         durationMs: Date.now() - startedAt,
-        elapsedSeconds: Number(fs.readFileSync(clockPath, "utf8").trim()),
-        observations: fs.readFileSync(
-          path.join(diagnosticDir, "post-deadline-observations.log"),
-          "utf8",
-        ),
+        elapsedSeconds: Number(readText(clockPath).trim()),
+        observations: readText(diagnosticDir, "post-deadline-observations.log"),
         result: { ...result, status: result.code },
         snapshots: fs.existsSync(snapshotsRoot) ? fs.readdirSync(snapshotsRoot).toSorted() : [],
         snapshotsRoot,
@@ -834,16 +800,16 @@ fi
     );
     expect(lateReady.result.status).toBe(1);
     expect(lateReady.result.stderr).toContain("::error::latched readiness failure");
-    expect(lateReady.observations).toContain("late_adb_online_at=");
-    expect(lateReady.observations).toContain("late_boot_completed_at=");
-    expect(lateReady.observations).toContain("observation_stop=late-boot-completed");
+    expectContains(
+      lateReady.observations,
+      "late_adb_online_at=",
+      "late_boot_completed_at=",
+      "observation_stop=late-boot-completed",
+    );
     expect(lateReady.snapshots).toEqual(["first-online"]);
-    expect(
-      fs.readFileSync(
-        path.join(lateReady.snapshotsRoot, "first-online", "boot-properties.txt"),
-        "utf8",
-      ),
-    ).toContain("probe_exit_status=0");
+    expect(readText(lateReady.snapshotsRoot, "first-online", "boot-properties.txt")).toContain(
+      "probe_exit_status=0",
+    );
 
     const [failedBootProbeResult, boundedSnapshotsResult] = await Promise.allSettled([
       runPostDeadlineObservation(
@@ -950,43 +916,27 @@ fi
     expect(boundedSnapshots.observations).toContain("observation_stop=observation-cap-reached");
     expect(boundedSnapshots.snapshots).toEqual(["first-online", "near-ceiling"]);
     for (const snapshot of boundedSnapshots.snapshots) {
-      const properties = fs.readFileSync(
-        path.join(boundedSnapshots.snapshotsRoot, snapshot, "boot-properties.txt"),
-        "utf8",
-      );
-      const logcat = fs.readFileSync(
-        path.join(boundedSnapshots.snapshotsRoot, snapshot, "system-crash-logcat.txt"),
-        "utf8",
-      );
-      expect(properties).toContain("output_truncated=true");
-      expect(properties).toContain("retained_bytes=64");
-      expect(logcat).toContain("output_truncated=true");
-      expect(logcat).toContain("retained_bytes=128");
+      const properties = readText(boundedSnapshots.snapshotsRoot, snapshot, "boot-properties.txt");
+      const logcat = readText(boundedSnapshots.snapshotsRoot, snapshot, "system-crash-logcat.txt");
+      expectContains(properties, "output_truncated=true", "retained_bytes=64");
+      expectContains(logcat, "output_truncated=true", "retained_bytes=128");
     }
 
     const probeFunctionEnd = observationFunctions.indexOf("\n\nobserve_after_readiness_timeout()");
     expect(probeFunctionEnd).toBeGreaterThan(0);
     const probeFunction = observationFunctions.slice(0, probeFunctionEnd);
     const fastProbeStartedAt = Date.now();
-    const fastProbe = spawnSync(
-      "/bin/bash",
+    const fastProbe = bash(
       [
-        "-c",
-        [
-          "set -euo pipefail",
-          probeFunction,
-          'run_bounded_probe "$PROBE_OUTPUT" "$((SECONDS + 10))" /usr/bin/true',
-          'printf "status=%s timed_out=%s\\n" "$probe_status" "$probe_timed_out"',
-        ].join("\n"),
-      ],
+        "set -euo pipefail",
+        probeFunction,
+        'run_bounded_probe "$PROBE_OUTPUT" "$((SECONDS + 10))" /usr/bin/true',
+        'printf "status=%s timed_out=%s\\n" "$probe_status" "$probe_timed_out"',
+      ].join("\n"),
       {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PROBE_OUTPUT: path.join(tempRoots.make("openclaw-android-probe-fast-"), "probe.txt"),
-        },
-        timeout: 2_000,
+        PROBE_OUTPUT: path.join(tempRoots.make("openclaw-android-probe-fast-"), "probe.txt"),
       },
+      { timeout: 2_000 },
     );
     expect(fastProbe.status, fastProbe.stderr).toBe(0);
     expect(fastProbe.stdout).toBe("status=0 timed_out=false\n");
@@ -994,42 +944,34 @@ fi
 
     const probeTimeoutRoot = tempRoots.make("openclaw-android-probe-timeout-");
     const probePidFile = path.join(probeTimeoutRoot, "probe.pid");
-    const probeTimeout = spawnSync(
-      "/bin/bash",
+    const probeTimeout = bash(
       [
-        "-c",
-        [
-          "set -euo pipefail",
-          "unset SECONDS",
-          "SECONDS=0",
-          'mkfifo "$PROBE_READY_FILE"',
-          'exec 3<>"$PROBE_READY_FILE"',
-          // Expire only after the child has installed its TERM trap and recorded its PID.
-          "sleep() {",
-          "  read -r ready <&3",
-          '  [[ "$ready" == ready ]]',
-          "  SECONDS=1",
-          "}",
-          probeFunction,
-          'run_bounded_probe "$PROBE_OUTPUT" "$((SECONDS + 1))" /bin/bash -c ' +
-            '\'trap "" TERM; printf "%s\\n" "$$" >"$PROBE_PID_FILE"; printf "ready\\n" >&3; exec sleep 30\'',
-          'printf "status=%s timed_out=%s\\n" "$probe_status" "$probe_timed_out"',
-        ].join("\n"),
-      ],
+        "set -euo pipefail",
+        "unset SECONDS",
+        "SECONDS=0",
+        'mkfifo "$PROBE_READY_FILE"',
+        'exec 3<>"$PROBE_READY_FILE"',
+        // Expire only after the child has installed its TERM trap and recorded its PID.
+        "sleep() {",
+        "  read -r ready <&3",
+        '  [[ "$ready" == ready ]]',
+        "  SECONDS=1",
+        "}",
+        probeFunction,
+        'run_bounded_probe "$PROBE_OUTPUT" "$((SECONDS + 1))" /bin/bash -c ' +
+          '\'trap "" TERM; printf "%s\\n" "$$" >"$PROBE_PID_FILE"; printf "ready\\n" >&3; exec sleep 30\'',
+        'printf "status=%s timed_out=%s\\n" "$probe_status" "$probe_timed_out"',
+      ].join("\n"),
       {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          PROBE_OUTPUT: path.join(probeTimeoutRoot, "probe.txt"),
-          PROBE_PID_FILE: probePidFile,
-          PROBE_READY_FILE: path.join(probeTimeoutRoot, "probe.ready"),
-        },
-        timeout: 5_000,
+        PROBE_OUTPUT: path.join(probeTimeoutRoot, "probe.txt"),
+        PROBE_PID_FILE: probePidFile,
+        PROBE_READY_FILE: path.join(probeTimeoutRoot, "probe.ready"),
       },
+      { timeout: 5_000 },
     );
     expect(probeTimeout.status, probeTimeout.stderr).toBe(0);
     expect(probeTimeout.stdout).toBe("status=124 timed_out=true\n");
-    const probePid = Number.parseInt(fs.readFileSync(probePidFile, "utf8").trim(), 10);
+    const probePid = Number.parseInt(readText(probePidFile).trim(), 10);
     expect(() => process.kill(probePid, 0)).toThrow();
 
     const cleanupFunctionStart = diagnostic.indexOf("cleanup() {");
@@ -1055,67 +997,58 @@ fi
       { mode: 0o755 },
     );
     fs.writeFileSync(path.join(hangingBin, "ps"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
-    const hangingResult = spawnSync(
-      "/bin/bash",
+    const hangingResult = bash(
       [
-        "-c",
-        [
-          "set -euo pipefail",
-          "sample_owned_qemu() { :; }",
-          observationFunctions,
-          cleanupFunction,
-          "readiness_failure_latched=0",
-          "adb_started=1",
-          "final_cold_boot_observation_seconds=900",
-          "emulator_observation_deadline=$((SECONDS + 3))",
-          'export AVD_NAME="OpenClaw_Screenshots_API36"',
-          "sleep 30 &",
-          "emulator_pid=$!",
-          'printf "%s\\n" "$emulator_pid" >"$EMULATOR_PID_FILE"',
-          "trap cleanup EXIT",
-          'fail_after_readiness_timeout "latched readiness failure" ""',
-        ].join("\n"),
-      ],
+        "set -euo pipefail",
+        "sample_owned_qemu() { :; }",
+        observationFunctions,
+        cleanupFunction,
+        "readiness_failure_latched=0",
+        "adb_started=1",
+        "final_cold_boot_observation_seconds=900",
+        "emulator_observation_deadline=$((SECONDS + 3))",
+        'export AVD_NAME="OpenClaw_Screenshots_API36"',
+        "sleep 30 &",
+        "emulator_pid=$!",
+        'printf "%s\\n" "$emulator_pid" >"$EMULATOR_PID_FILE"',
+        "trap cleanup EXIT",
+        'fail_after_readiness_timeout "latched readiness failure" ""',
+      ].join("\n"),
       {
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          ADB_PID_FILE: adbPidFile,
-          CLEANUP_TRACE: path.join(hangingRoot, "cleanup.trace"),
-          DIAGNOSTIC_DIR: hangingDiagnosticDir,
-          EMULATOR_PID_FILE: emulatorPidFile,
-          PATH: `${hangingBin}${path.delimiter}${process.env.PATH ?? ""}`,
-        },
-        timeout: 10_000,
+        ADB_PID_FILE: adbPidFile,
+        CLEANUP_TRACE: path.join(hangingRoot, "cleanup.trace"),
+        DIAGNOSTIC_DIR: hangingDiagnosticDir,
+        EMULATOR_PID_FILE: emulatorPidFile,
+        PATH: `${hangingBin}${path.delimiter}${process.env.PATH ?? ""}`,
       },
+      { timeout: 10_000 },
     );
     expect(hangingResult.status, hangingResult.stderr).toBe(1);
-    const hangingObservations = fs.readFileSync(
-      path.join(hangingDiagnosticDir, "post-deadline-observations.log"),
-      "utf8",
+    const hangingObservations = readText(hangingDiagnosticDir, "post-deadline-observations.log");
+    expectContains(
+      hangingObservations,
+      "adb_timed_out=true",
+      "observation_stop=observation-cap-reached",
     );
-    expect(hangingObservations).toContain("adb_timed_out=true");
-    expect(hangingObservations).toContain("observation_stop=observation-cap-reached");
-    expect(fs.readFileSync(path.join(hangingRoot, "cleanup.trace"), "utf8")).toBe("cleanup\n");
-    expect(fs.readFileSync(path.join(hangingDiagnosticDir, "cleanup.log"), "utf8")).toContain(
+    expect(readText(hangingRoot, "cleanup.trace")).toBe("cleanup\n");
+    expect(readText(hangingDiagnosticDir, "cleanup.log")).toContain(
       "adb_kill_server_skipped_after_latched_timeout=true",
     );
     for (const pidFile of [adbPidFile, emulatorPidFile]) {
-      const pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+      const pid = Number.parseInt(readText(pidFile).trim(), 10);
       expect(() => process.kill(pid, 0)).toThrow();
     }
-    expect(diagnostic).toContain(
+    expectContains(
+      diagnostic,
       "device_deadline=$((SECONDS + ANDROID_SCREENSHOT_EMULATOR_TIMEOUT_SECONDS))",
-    );
-    expect(diagnostic).toContain(
       "boot_deadline=$((SECONDS + ANDROID_SCREENSHOT_EMULATOR_TIMEOUT_SECONDS))",
+      '>"$DIAGNOSTIC_DIR/emulator.log" 2>&1 &',
+      "adb devices -l",
+      '>>"$DIAGNOSTIC_DIR/adb-observations.log" 2>&1',
+      'ps -p "$emulator_pid"',
+      "adb kill-server",
+      "trap cleanup EXIT",
     );
-    expect(diagnostic).toContain('>"$DIAGNOSTIC_DIR/emulator.log" 2>&1 &');
-    expect(diagnostic).toContain("adb devices -l");
-    expect(diagnostic).toContain('>>"$DIAGNOSTIC_DIR/adb-observations.log" 2>&1');
-    expect(diagnostic).toContain('ps -p "$emulator_pid"');
-    expect(diagnostic).toContain("adb kill-server");
-    expect(diagnostic).toContain("trap cleanup EXIT");
     expect(diagnostic).toMatch(
       /fail_after_readiness_timeout \\\n\s+"Timed out waiting for exactly one Android emulator device" ""/u,
     );
@@ -1144,7 +1077,7 @@ fi
     ] as const;
 
     const readToolingBody = (file: string): string => {
-      const workflow = parse(fs.readFileSync(file, "utf8")) as {
+      const workflow = parse(readText(file)) as {
         jobs: Record<string, { steps?: Array<{ name: string; run?: string }> }>;
       };
       const matches = Object.values(workflow.jobs)
@@ -1198,9 +1131,7 @@ fi
       const installSentinel = path.join(root, "install-ran");
       const adapterSentinel = path.join(root, "adapter-ran");
       const kvmSentinel = path.join(root, "kvm-ran");
-      const adapterSource = [
-        "#!/bin/bash",
-        "set -euo pipefail",
+      const adapterSource = shell(
         'output=""',
         "while (( $# > 0 )); do",
         '  if [[ "$1" == "--out" ]]; then output="$2"; shift 2; else shift; fi',
@@ -1208,8 +1139,7 @@ fi
         'test -n "$output"',
         'printf "jpeg\\n" >"$output"',
         'printf "adapter\\n" >"$ADAPTER_SENTINEL"',
-        "",
-      ].join("\n");
+      );
       fs.mkdirSync(bin);
       fs.mkdirSync(runnerTemp);
       fs.mkdirSync(diagnosticDir);
@@ -1232,9 +1162,7 @@ fi
       };
       const timeout = writeExecutable(
         "timeout",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
+        shell(
           "while (( $# > 0 )); do",
           '  case "$1" in',
           "    --signal=*|--kill-after=*) shift ;;",
@@ -1243,26 +1171,20 @@ fi
           "  esac",
           "done",
           'exec "$@"',
-          "",
-        ].join("\n"),
+        ),
       );
       const sudo = writeExecutable(
         "sudo",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
+        shell(
           'test "$1" = "env"',
           "shift",
           'while (( $# > 0 )) && [[ "$1" == *=* ]]; do export "$1"; shift; done',
           'exec "$@"',
-          "",
-        ].join("\n"),
+        ),
       );
       const aptGet = writeExecutable(
         "apt-get",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
+        shell(
           'printf "%s\\n" "$*" >>"$APT_LOG"',
           'if (( $# < 5 )) || [[ "$1" != "-o" || "$2" != "Dir::Etc::sourcelist=$APT_SOURCE" ||',
           '  "$3" != "-o" || "$4" != "Dir::Etc::sourceparts=$APT_SOURCE_PARTS" ]]; then',
@@ -1274,33 +1196,21 @@ fi
           'test "$7" = "--no-install-recommends"',
           'test "$8" = "imagemagick"',
           'printf "install\\n" >"$INSTALL_SENTINEL"',
-          "",
-        ].join("\n"),
+        ),
       );
       const convert = writeExecutable(
         "convert",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
-          'output="${!#}"',
-          'printf "png\\n" >"$output"',
-          "",
-        ].join("\n"),
+        shell('output="${!#}"', 'printf "png\\n" >"$output"'),
       );
       const identify = writeExecutable(
         "identify",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
+        shell(
           "printf 'format=JPEG width=1 height=1 colorspace=sRGB type=TrueColor channels=3.0 quality=95\\n'",
-          "",
-        ].join("\n"),
+        ),
       );
       writeExecutable(
         "git",
-        [
-          "#!/bin/bash",
-          "set -euo pipefail",
+        shell(
           'test "$1" = "-C"',
           "shift 2",
           'case "$1 $2" in',
@@ -1311,8 +1221,7 @@ fi
           "    ;;",
           "  *) exit 92 ;;",
           "esac",
-          "",
-        ].join("\n"),
+        ),
       );
 
       for (const trustedRoot of [path.join(root, ".mobile-release-tooling"), root]) {
@@ -1335,39 +1244,31 @@ fi
         .replaceAll("/usr/bin/identify", identify)
         .replaceAll("/etc/apt/sources.list.d/ubuntu.sources", aptSource);
 
-      const result = spawnSync(
-        "/bin/bash",
-        ["-c", [body, 'printf "kvm\\n" >"$KVM_SENTINEL"'].join("\n")],
+      const result = bash(
+        [body, 'printf "kvm\\n" >"$KVM_SENTINEL"'].join("\n"),
         {
-          cwd: root,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            ADAPTER_SENTINEL: adapterSentinel,
-            ADAPTER_SOURCE: path.join(root, "adapter-source.sh"),
-            APT_LOG: aptLog,
-            APT_SOURCE: aptSource,
-            APT_SOURCE_PARTS: aptSourceParts,
-            APT_UPDATE_EXIT: String(options.updateExit ?? 0),
-            DIAGNOSTIC_DIR: diagnosticDir,
-            GITHUB_WORKFLOW_SHA: "a".repeat(40),
-            INSTALL_SENTINEL: installSentinel,
-            KVM_SENTINEL: kvmSentinel,
-            PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-            RUNNER_ARCH: "X64",
-            RUNNER_OS: "Linux",
-            RUNNER_TEMP: runnerTemp,
-          },
-          timeout: 5_000,
+          ADAPTER_SENTINEL: adapterSentinel,
+          ADAPTER_SOURCE: path.join(root, "adapter-source.sh"),
+          APT_LOG: aptLog,
+          APT_SOURCE: aptSource,
+          APT_SOURCE_PARTS: aptSourceParts,
+          APT_UPDATE_EXIT: String(options.updateExit ?? 0),
+          DIAGNOSTIC_DIR: diagnosticDir,
+          GITHUB_WORKFLOW_SHA: "a".repeat(40),
+          INSTALL_SENTINEL: installSentinel,
+          KVM_SENTINEL: kvmSentinel,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+          RUNNER_ARCH: "X64",
+          RUNNER_OS: "Linux",
+          RUNNER_TEMP: runnerTemp,
         },
+        { cwd: root, timeout: 5_000 },
       );
       return {
         adapterSentinel: path.join(runnerTemp, "openclaw-android-tools/android-sips-linux.sh"),
         aptSource,
         aptSourceParts,
-        calls: fs.existsSync(aptLog)
-          ? fs.readFileSync(aptLog, "utf8").trim().split("\n").filter(Boolean)
-          : [],
+        calls: fs.existsSync(aptLog) ? readText(aptLog).trim().split("\n").filter(Boolean) : [],
         installSentinel,
         kvmSentinel,
         result,
@@ -1422,52 +1323,35 @@ fi
   });
 
   it("prepares native tooling and runs the iOS signing proof through Fastlane", () => {
-    const source = fs.readFileSync(".github/workflows/ios-store-release.yml", "utf8");
-    const workflow = parse(source) as {
-      jobs: {
-        release: {
-          steps: WorkflowStep[];
-        };
-      };
-    };
-    const releaseSteps = workflow.jobs.release.steps;
-    const xcodeIndex = releaseSteps.findIndex((step) => step.name === "Select Xcode");
-    const rustIndex = releaseSteps.findIndex(
-      (step) => step.name === "Install Watch Rust toolchain",
-    );
-    const createIndex = releaseSteps.findIndex(
-      (step) => step.name === "Create job-owned iOS signing keychain",
-    );
-    const signingProofIndex = releaseSteps.findIndex(
-      (step) => step.name === "Validate readonly iOS signing key access",
-    );
-    const uploadIndex = releaseSteps.findIndex(
-      (step) => step.name === "Prepare and upload iOS release",
-    );
+    const steps = releaseSteps(".github/workflows/ios-store-release.yml");
+    const xcodeIndex = stepIndex(steps, "Select Xcode");
+    const rustIndex = stepIndex(steps, "Install Watch Rust toolchain");
+    const createIndex = stepIndex(steps, "Create job-owned iOS signing keychain");
+    const signingProofIndex = stepIndex(steps, "Validate readonly iOS signing key access");
+    const uploadIndex = stepIndex(steps, "Prepare and upload iOS release");
 
-    const rustStep = releaseSteps[rustIndex];
+    const rustStep = steps[rustIndex];
 
     expect(xcodeIndex).toBeGreaterThanOrEqual(0);
     expect(rustIndex).toBeGreaterThan(xcodeIndex);
     expect(signingProofIndex).toBeGreaterThan(rustIndex);
     expect(rustStep?.if).toBe("hashFiles('apps/shared/OpenClawWatchRTC/Cargo.toml') != ''");
-    expect(rustStep?.run).toContain(
+    expectContains(
+      rustStep?.run,
       `watch_toolchain="$(awk -F '"' '/^channel =/ { print $2; exit }' apps/shared/OpenClawWatchRTC/rust-toolchain.toml)"`,
-    );
-    expect(rustStep?.run).toContain('test -n "$watch_toolchain"');
-    expect(rustStep?.run).toContain(
+      'test -n "$watch_toolchain"',
       'rustup toolchain install "$watch_toolchain" --profile minimal --component rust-src',
+      'echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"',
     );
-    expect(rustStep?.run).toContain('echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"');
 
     expect(createIndex).toBeGreaterThan(-1);
-    expect(releaseSteps[createIndex]?.uses).toBe("./.github/actions/ios-signing-keychain");
+    expect(steps[createIndex]?.uses).toBe("./.github/actions/ios-signing-keychain");
     expect(signingProofIndex).toBeGreaterThan(createIndex);
     expect(uploadIndex).toBeGreaterThan(signingProofIndex);
-    expect(releaseSteps[signingProofIndex]?.env).toEqual({
+    expect(steps[signingProofIndex]?.env).toEqual({
       MATCH_PASSWORD: "${{ secrets.MATCH_PASSWORD }}",
     });
-    const signingProof = releaseSteps[signingProofIndex]?.run;
+    const signingProof = steps[signingProofIndex]?.run;
     expect(signingProof).toBeTruthy();
     const fixtureRoot = tempRoots.make("openclaw-ios-signing-proof-");
     const workspace = path.join(fixtureRoot, "workspace");
@@ -1512,9 +1396,7 @@ fi
     );
     fs.writeFileSync(
       path.join(preparedBin, "bundle"),
-      [
-        "#!/bin/bash",
-        "set -euo pipefail",
+      shell(
         '[[ "$BUNDLE_GEMFILE" == "$FIXTURE_WORKSPACE/apps/ios/Gemfile" ]]',
         '[[ "$PWD" == "$FIXTURE_WORKSPACE/apps/ios" ]]',
         'printf "bundle:%s\\n" "$*" >>"$FIXTURE_EVENTS"',
@@ -1523,20 +1405,16 @@ fi
         'elif [[ "$2" != "exec" || "$3" != "fastlane" || "$4" != "ios" || "$5" != "signing_check" ]]; then',
         "  exit 43",
         "fi",
-        "",
-      ].join("\n"),
+      ),
       { mode: 0o755 },
     );
     fs.writeFileSync(
       path.join(preparedBin, "node"),
-      [
-        "#!/bin/bash",
-        "set -euo pipefail",
+      shell(
         '[[ "$PWD" == "$FIXTURE_WORKSPACE" ]]',
         '[[ "$*" == ".github/actions/ios-signing-keychain/keychain.mjs probe" ]]',
         'printf "probe:root-cwd\\n" >>"$FIXTURE_EVENTS"',
-        "",
-      ].join("\n"),
+      ),
       { mode: 0o755 },
     );
 
@@ -1557,7 +1435,7 @@ fi
         timeout: 5_000,
       });
       return {
-        events: fs.readFileSync(eventsPath, "utf8").trim().split("\n").filter(Boolean),
+        events: readText(eventsPath).trim().split("\n").filter(Boolean),
         result,
       };
     };
@@ -1574,9 +1452,7 @@ fi
     expect(failedCheck.result.status).not.toBe(0);
     expect(failedCheck.events).toEqual(["bundle:_4.0.22_ check"]);
 
-    const action = parse(
-      fs.readFileSync(".github/actions/ios-signing-keychain/action.yml", "utf8"),
-    ) as {
+    const action = parse(readText(".github/actions/ios-signing-keychain/action.yml")) as {
       runs: {
         main: string;
         post: string;
@@ -1666,7 +1542,7 @@ fi
           if (!requestedPath) {
             throw new Error("Missing create_keychain path");
           }
-          expect(fs.readFileSync(stateFile, "utf8")).toContain(`requested_path=${requestedPath}\n`);
+          expect(readText(stateFile)).toContain(`requested_path=${requestedPath}\n`);
           const password = options.env?.KEYCHAIN_PASSWORD;
           expect(password).toMatch(/^[a-f0-9]{64}$/u);
           expect(args.join("\n")).not.toContain(password);
@@ -1689,7 +1565,7 @@ fi
       expect(created.resolvedPath).toBe(`${created.requestedPath}${filenameSuffix}`);
       expect(fs.statSync(created.ownedRoot).mode & 0o777).toBe(0o700);
       expect(actionOutput).toBe(`::add-mask::${created.password}\n`);
-      expect(fs.readFileSync(environmentFile, "utf8")).toBe(
+      expect(readText(environmentFile)).toBe(
         `MATCH_KEYCHAIN_NAME=${created.resolvedPath}\n` +
           `MATCH_KEYCHAIN_PASSWORD=${created.password}\n`,
       );
@@ -1709,15 +1585,18 @@ fi
       expect(commands.at(-1)?.args).toContain(`keychain_path:${created.resolvedPath}`);
     }
 
-    const source = fs.readFileSync(".github/actions/ios-signing-keychain/keychain.mjs", "utf8");
+    const source = readText(".github/actions/ios-signing-keychain/keychain.mjs");
     expect(source.indexOf("maskSecret(password, output)")).toBeLessThan(
       source.indexOf(
         'appendCommandValue(environmentFile, "MATCH_KEYCHAIN_PASSWORD", password, appendFile)',
       ),
     );
-    expect(source).toContain("default_keychain: false");
-    expect(source).toContain("lock_after_timeout: true");
-    expect(source).toContain("timeout: KEYCHAIN_LIFETIME_SECONDS");
+    expectContains(
+      source,
+      "default_keychain: false",
+      "lock_after_timeout: true",
+      "timeout: KEYCHAIN_LIFETIME_SECONDS",
+    );
     expect(source).not.toContain("skip_set_partition_list");
   });
 
