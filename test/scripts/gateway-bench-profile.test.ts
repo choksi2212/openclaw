@@ -202,7 +202,6 @@ it("captures live worker resources and a valid snapshot, then removes retired wo
   expect((await readGatewayResources(child)).workers).toBeUndefined();
   const captured = await readGatewayResources(child, {
     includeWorkers: true,
-    collectGarbage: true,
     workerSnapshotPathPrefix: path.join(directory, "retained"),
   });
   const owned = captured.workers?.filter((row) => row.script === "session-transcript.worker.js");
@@ -233,6 +232,13 @@ it("captures live worker resources and a valid snapshot, then removes retired wo
   expect(snapshot.snapshot.meta.node_fields).toContain("name");
   expect(snapshot.nodes.length).toBeGreaterThan(0);
   expect(snapshot.strings).toContain("worker-footprint-retained-marker");
+  const collected = await readGatewayResources(child, {
+    includeWorkers: true,
+    collectGarbage: true,
+  });
+  const collectedWorker = collected.workers?.find((entry) => entry.threadId === worker.threadId);
+  expect(collectedWorker).toMatchObject({ script: "session-transcript.worker.js" });
+  expect(collectedWorker?.gcError).toBeUndefined();
   expect(await sendMessage(child, { retire: true })).toEqual({ retired: true });
   expect((await readGatewayResources(child, { includeWorkers: true })).workers).not.toEqual(
     expect.arrayContaining([expect.objectContaining({ threadId: worker.threadId })]),

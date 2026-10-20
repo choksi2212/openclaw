@@ -1,9 +1,8 @@
-import { createWriteStream, writeFileSync } from "node:fs";
+import { closeSync, openSync, writeFileSync } from "node:fs";
 import type { Session } from "node:inspector/promises";
 import { performance } from "node:perf_hooks";
-import { pipeline } from "node:stream/promises";
 import type { Worker } from "node:worker_threads";
-import { createGzip } from "node:zlib";
+import { gzipSync } from "node:zlib";
 import { coerceErrorMessage as errorMessage } from "./error-format.mts";
 import {
   GATEWAY_CPU_SAMPLE_INTERVAL_MICROS,
@@ -176,12 +175,12 @@ export class GatewayBenchWorkerProfiler {
       .filter((worker) => worker.threadId !== -1)
       .map((worker) => ({ worker, threadId: worker.threadId }));
     const gcErrors = new Map<number, string>();
-    if (options.collectGarbage) {
+    if (options.collectGarbage || options.snapshotPathPrefix) {
       this.enabled ??= this.inspector.post("NodeWorker.enable", { waitForDebuggerOnStart: false });
       await this.enabled;
-      const targets = new Map(
-        [...this.targets.values()].map((target) => [target.threadId, target]),
-      );
+    }
+    const targets = new Map([...this.targets.values()].map((target) => [target.threadId, target]));
+    if (options.collectGarbage) {
       await Promise.all(
         workers.map(async ({ threadId }) => {
           try {
@@ -214,15 +213,14 @@ export class GatewayBenchWorkerProfiler {
     });
     if (options.snapshotPathPrefix) {
       // Heap snapshots can be large; never write more than one isolate at a time.
-      for (const [index, { worker }] of workers.entries()) {
-        const resource = resources[index]!;
+      for (const resource of resources) {
         const snapshotPath = `${options.snapshotPathPrefix}.worker-${resource.threadId}.heapsnapshot.gz`;
         try {
-          await pipeline(
-            await worker.getHeapSnapshot(),
-            createGzip(),
-            createWriteStream(snapshotPath, { mode: 0o600 }),
-          );
+          const target = targets.get(resource.threadId);
+          if (!target) {
+            throw new Error("Worker inspector target is unavailable");
+          }
+          await this.takeHeapSnapshot(target, snapshotPath);
           resource.snapshotPath = snapshotPath;
         } catch (error) {
           resource.snapshotError = errorMessage(error);
@@ -230,6 +228,44 @@ export class GatewayBenchWorkerProfiler {
       }
     }
     return resources;
+  }
+
+  private async takeHeapSnapshot(target: WorkerTarget, snapshotPath: string): Promise<void> {
+    const output = openSync(snapshotPath, "w", 0o600);
+    let writeError: Error | undefined;
+    let chunks = 0;
+    const receive = ({ params }: { params: { sessionId: string; message: string } }) => {
+      if (params.sessionId !== target.sessionId || writeError) {
+        return;
+      }
+      const message: { method?: string; params: { chunk: string } } = JSON.parse(params.message);
+      if (message.method !== "HeapProfiler.addHeapSnapshotChunk") {
+        return;
+      }
+      try {
+        // Inspector notifications cannot await stream backpressure. Independent
+        // gzip members keep memory bounded to one chunk and decompress as one file.
+        writeFileSync(output, gzipSync(message.params.chunk));
+        chunks++;
+      } catch (error) {
+        writeError = new Error(errorMessage(error));
+      }
+    };
+    this.inspector.on("NodeWorker.receivedMessageFromWorker", receive);
+    try {
+      // The existing request owner rejects on detach; no native snapshot handle
+      // outlives its Worker when idle retirement interrupts this capture.
+      await this.post(target, "HeapProfiler.takeHeapSnapshot");
+      if (writeError) {
+        throw writeError;
+      }
+      if (chunks === 0) {
+        throw new Error("Worker heap snapshot returned no chunks");
+      }
+    } finally {
+      this.inspector.off("NodeWorker.receivedMessageFromWorker", receive);
+      closeSync(output);
+    }
   }
 
   private record(target: WorkerTarget, capture: Capture): void {

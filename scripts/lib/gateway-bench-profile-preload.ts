@@ -100,11 +100,13 @@ if (isMainThread) {
     }
     if (message.kind === "resource-usage" && message.action === "sample") {
       void (async () => {
-        if (message.collectGarbage) {
+        if (message.collectGarbage || message.workerSnapshotPathPrefix) {
           if (!inspectorConnected) {
             inspector.connect();
             inspectorConnected = true;
           }
+        }
+        if (message.collectGarbage) {
           await inspector.post("HeapProfiler.collectGarbage");
         }
         const resources = message.initial ? { ...initialResources } : sampleResources();
