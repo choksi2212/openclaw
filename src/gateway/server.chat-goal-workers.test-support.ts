@@ -53,6 +53,18 @@ export function registerWorkerGoalChatCases(
   client: GatewayClient,
 ) {
   const userMessages = () => readGoalChatUserMessages(scope());
+  const expectNoGoalInput = () => {
+    expect(loadSessionEntry(scope())?.goal).toBeUndefined();
+    expect(userMessages()).toEqual([]);
+  };
+  const expectAccepted = (response: Mock<RespondFn>, payload: Record<string, unknown>) => {
+    expect(response.mock.calls[0]).toEqual([
+      true,
+      expect.objectContaining(payload),
+      undefined,
+      expect.anything(),
+    ]);
+  };
   it.each([
     "continue",
     "preparation-failed",
@@ -307,8 +319,7 @@ export function registerWorkerGoalChatCases(
           starting,
           "Worker Goal returned before runtime admission",
         );
-        expect(loadSessionEntry(scope())?.goal).toBeUndefined();
-        expect(userMessages()).toEqual([]);
+        expectNoGoalInput();
         if (mode === "continue") {
           const duplicate = await rpc("chat.send", request, undefined, operator);
           expect(duplicate.mock.calls[0]?.[0]).toBe(false);
@@ -323,8 +334,7 @@ export function registerWorkerGoalChatCases(
         if (mode !== "continue") {
           expect(started.mock.calls[0]?.[0]).toBe(false);
           await waitForDispatchEnd();
-          expect(loadSessionEntry(scope())?.goal).toBeUndefined();
-          expect(userMessages()).toEqual([]);
+          expectNoGoalInput();
           if (mode === "claim-revoked" || mode === "claim-reassigned") {
             expect(claimChangedAtCommit).toBe(true);
             expect(revokedClaim).toBeDefined();
@@ -348,12 +358,7 @@ export function registerWorkerGoalChatCases(
             });
             expect(runEmbeddedAgent).toHaveBeenCalledOnce();
             const retried = await rpc("chat.send", request, undefined, operator);
-            expect(retried.mock.calls[0]).toEqual([
-              true,
-              expect.objectContaining({ status: "started", action: "start" }),
-              undefined,
-              expect.anything(),
-            ]);
+            expectAccepted(retried, { status: "started", action: "start" });
             await waitForDispatchEnd();
             expect(loadSessionEntry(scope())?.goal).toMatchObject({
               status: "complete",
@@ -364,20 +369,14 @@ export function registerWorkerGoalChatCases(
           }
           return;
         }
-        expect(started.mock.calls[0]).toEqual([
-          true,
-          expect.objectContaining({
-            status: "started",
-            action: "start",
-            goalId: expect.any(String),
-          }),
-          undefined,
-          expect.anything(),
-        ]);
+        expectAccepted(started, {
+          status: "started",
+          action: "start",
+          goalId: expect.any(String),
+        });
         await waitForDispatchEnd();
         const first = loadSessionEntry(scope())!.goal!;
-        expect(first.status).toBe("paused");
-        expect(first.continuationTurns).toBe(0);
+        expect(first).toMatchObject({ status: "paused", continuationTurns: 0 });
         expect(userMessages()).toHaveLength(1);
         const resumed = await rpc(
           "sessions.goal.update",
@@ -392,12 +391,7 @@ export function registerWorkerGoalChatCases(
           undefined,
           operator,
         );
-        expect(resumed.mock.calls[0]).toEqual([
-          true,
-          expect.objectContaining({ action: "resume", goalId: first.id }),
-          undefined,
-          expect.anything(),
-        ]);
+        expectAccepted(resumed, { action: "resume", goalId: first.id });
         expect((await waitForGatewayActiveWork(30_000)).drained).toBe(true);
         expect(loadSessionEntry(scope())?.goal).toMatchObject({
           id: first.id,
@@ -488,8 +482,7 @@ export function registerWorkerGoalChatCases(
             "Error: Goal start or resume requires an idle built-in local session with recoverable history or a supported Codex cloud-worker session.",
         }),
       );
-      expect(loadSessionEntry(scope())?.goal).toBeUndefined();
-      expect(userMessages()).toEqual([]);
+      expectNoGoalInput();
       expect(runEmbeddedAgent).not.toHaveBeenCalled();
     } finally {
       clearAgentRunContext(runId);

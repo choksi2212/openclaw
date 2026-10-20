@@ -25,8 +25,6 @@ import {
 } from "./test/server-sessions.test-helpers.js";
 import { resolveWorkerPlacementSessionRuntimeAsync } from "./worker-environments/placement-session-runtime.js";
 
-// Keep the production RPC, authorization, recovery and input-storage owners.
-// Only the downstream inference boundary is held while inspecting admission.
 afterEach(() => drainGlobalSingletonLifecycleState());
 const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
 const prepareProfiles = useUserProfileCatalogForTest();
@@ -152,6 +150,15 @@ async function fixture(
     context,
     transcript,
     entry: () => loadSessionEntry(scope),
+    async expectUnchangedAfter(entry = loadSessionEntry(scope)) {
+      const events = await transcript();
+      return async () => {
+        expect(loadSessionEntry(scope)).toEqual(entry);
+        expect(await transcript()).toEqual(events);
+        expect((await listSessionPendingInputs(scope)).items).toEqual([]);
+        expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+      };
+    },
     drain: () => Promise.all([...executions, ...(runAdded ? [runRemoved.promise] : [])]),
   };
 }
@@ -248,9 +255,7 @@ test.for([false, true])(
       expect(results.filter((result) => !result.ok)).toHaveLength(1);
       await withinTest(dispatched.promise, signal);
       const repeated = await recover(current);
-      expect(repeated, JSON.stringify(repeated)).toMatchObject({
-        ok: false,
-      });
+      expect(repeated, JSON.stringify(repeated)).toMatchObject({ ok: false });
       expect(calls).toBe(1);
       expect((await listSessionPendingInputs(current.scope)).items).toHaveLength(1);
       expect(current.entry()?.archivedAt).toBeUndefined();
@@ -325,7 +330,7 @@ test.for([undefined, "media", "message", "text"] as const)(
           sessionKey: current.key,
         }),
       ).toBe("claude-cli");
-      const transcript = await current.transcript();
+      const expectUnchanged = await current.expectUnchangedAfter(before);
       const rejected = await recover(current);
       expect(rejected, JSON.stringify(rejected)).toMatchObject({
         ok: true,
@@ -338,10 +343,7 @@ test.for([undefined, "media", "message", "text"] as const)(
           },
         },
       });
-      expect(current.entry()).toEqual(before);
-      expect(await current.transcript()).toEqual(transcript);
-      expect((await listSessionPendingInputs(current.scope)).items).toEqual([]);
-      expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+      await expectUnchanged();
     } finally {
       try {
         await current.drain();
@@ -356,22 +358,17 @@ test.for(["sessionId", "recoveryCycleId"] as const)(
   "a stale resume %s cannot clear the current tombstone",
   async (field) => {
     const current = await fixture(`stale-${field}`);
-    const before = current.entry();
-    const transcript = await current.transcript();
+    const expectUnchanged = await current.expectUnchangedAfter();
     const rejected = await recover({ ...current, [field]: `previous-${field}` });
     expect(rejected, JSON.stringify(rejected)).toMatchObject({ ok: false });
-    expect(current.entry()).toEqual(before);
-    expect(await current.transcript()).toEqual(transcript);
-    expect((await listSessionPendingInputs(current.scope)).items).toEqual([]);
-    expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+    await expectUnchanged();
   },
 );
 
 test("operator resume rejects a foreign read-only caller without clearing the tombstone", async () => {
   const current = await fixture("denied-resume");
   const reader = roleClient("view", "resume-foreign-reader");
-  const before = current.entry();
-  const transcript = await current.transcript();
+  const expectUnchanged = await current.expectUnchangedAfter();
   const denied = await recover(current, { client: reader });
   expect(denied).toMatchObject({
     ok: false,
@@ -380,18 +377,14 @@ test("operator resume rejects a foreign read-only caller without clearing the to
       details: { code: "SESSION_PARTICIPATION_REQUIRED" },
     },
   });
-  expect(current.entry()).toEqual(before);
-  expect(await current.transcript()).toEqual(transcript);
-  expect((await listSessionPendingInputs(current.scope)).items).toEqual([]);
-  expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+  await expectUnchanged();
 });
 
 test("operator revocation while resume waits for admission preserves the tombstone", async ({
   signal,
 }) => {
   const current = await fixture("revoked-resume");
-  const before = current.entry();
-  const transcript = await current.transcript();
+  const expectUnchanged = await current.expectUnchangedAfter();
   const locked = createDeferredCore();
   const unlock = createDeferredCore();
   const admissionQueued = createDeferredCore();
@@ -430,10 +423,7 @@ test("operator revocation while resume waits for admission preserves the tombsto
     authorized = false;
     unlock.resolve();
     await expect(request).rejects.toThrow("Gateway requester authority changed");
-    expect(current.entry()).toEqual(before);
-    expect(await current.transcript()).toEqual(transcript);
-    expect((await listSessionPendingInputs(current.scope)).items).toEqual([]);
-    expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+    await expectUnchanged();
   } finally {
     authorized = false;
     unlock.resolve();

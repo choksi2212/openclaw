@@ -1,5 +1,3 @@
-// Gateway server chat tests cover WebSocket chat flow, history construction,
-// NO_REPLY handling, agent events, and connected control-UI delivery.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -105,6 +103,36 @@ const {
   withMainSessionStore,
 } = gatewaySuite;
 
+function sessionEntry(sessionKey = "agent:main:main") {
+  const storePath = testState.sessionStorePath;
+  if (!storePath) {
+    throw new Error("session store path was not initialized");
+  }
+  return loadSessionEntry({ sessionKey, storePath });
+}
+
+async function withOperator(scopes: string[], run: (socket: WebSocket) => Promise<void>) {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+  trackConnectChallengeNonce(socket);
+  try {
+    await new Promise<void>((resolve) => {
+      socket.once("open", resolve);
+    });
+    await connectOk(socket, { scopes });
+    await run(socket);
+  } finally {
+    socket.close();
+  }
+}
+
+async function useRealReply() {
+  const { getReplyFromConfig } = await import("../auto-reply/reply/get-reply.js");
+  const { withFullRuntimeReplyConfig } = await import("../auto-reply/reply/get-reply-fast-path.js");
+  mockGetReplyFromConfigOnce((ctx, opts, cfg) =>
+    getReplyFromConfig(ctx, opts, cfg ? withFullRuntimeReplyConfig(cfg) : cfg),
+  );
+}
+
 describe("gateway server chat", () => {
   test("fixture cleanup joins the exact retained chat.send root", async () => {
     const admission = await import("../process/gateway-work-admission.js");
@@ -140,18 +168,7 @@ describe("gateway server chat", () => {
 
   test("chat.send does not persist verboseLevel for operator.write callers", async () => {
     await withMainSessionStore(async () => {
-      let scopedWs: WebSocket | undefined;
-
-      try {
-        scopedWs = new WebSocket(`ws://127.0.0.1:${port}`);
-        trackConnectChallengeNonce(scopedWs);
-        await new Promise<void>((resolve) => {
-          scopedWs?.once("open", resolve);
-        });
-        await connectOk(scopedWs, {
-          scopes: ["operator.write"],
-        });
-
+      await withOperator(["operator.write"], async (scopedWs) => {
         const sendRes = await rpcReq(scopedWs, "chat.send", {
           sessionKey: "main",
           message: "/verbose full",
@@ -161,17 +178,8 @@ describe("gateway server chat", () => {
 
         await waitForAgentRunDrained("idem-write-scope-verbose-no-persist", scopedWs);
 
-        const sessionStorePath = testState.sessionStorePath;
-        if (!sessionStorePath) {
-          throw new Error("session store path was not initialized");
-        }
-        expect(
-          loadSessionEntry({ sessionKey: "agent:main:main", storePath: sessionStorePath })
-            ?.verboseLevel,
-        ).toBeUndefined();
-      } finally {
-        scopedWs?.close();
-      }
+        expect(sessionEntry()?.verboseLevel).toBeUndefined();
+      });
     });
   });
 
@@ -187,31 +195,17 @@ describe("gateway server chat", () => {
 
       await waitForAgentRunDrained("idem-chat-thinking-no-persist");
 
-      const sessionStorePath = testState.sessionStorePath;
-      if (!sessionStorePath) {
-        throw new Error("session store path was not initialized");
-      }
-      expect(
-        loadSessionEntry({ sessionKey: "agent:main:main", storePath: sessionStorePath })
-          ?.thinkingLevel,
-      ).toBeUndefined();
-      expect(
-        loadSessionEntry({ sessionKey: "main", storePath: sessionStorePath })?.thinkingLevel,
-      ).toBeUndefined();
+      expect(sessionEntry()?.thinkingLevel).toBeUndefined();
+      expect(sessionEntry("main")?.thinkingLevel).toBeUndefined();
     });
   });
 
   test("chat.send preserves sessions and denies operator.write reset triggers", async () => {
     const message = "/reset soft Create a note";
-    const { getReplyFromConfig } = await import("../auto-reply/reply/get-reply.js");
-    const { withFullRuntimeReplyConfig } =
-      await import("../auto-reply/reply/get-reply-fast-path.js");
+    await useRealReply();
     const replyRun = await import("../auto-reply/reply/get-reply-run.js");
     const runSpy = vi.spyOn(replyRun, "runPreparedReply").mockResolvedValue(undefined);
     // Keep real command/session dispatch; only intercept the model-run boundary.
-    mockGetReplyFromConfigOnce((ctx, opts, cfg) =>
-      getReplyFromConfig(ctx, opts, cfg ? withFullRuntimeReplyConfig(cfg) : cfg),
-    );
     try {
       await withMainSessionStore(async () => {
         const sessionStorePath = testState.sessionStorePath;
@@ -228,18 +222,7 @@ describe("gateway server chat", () => {
             () => resetState,
           ),
         ).not.toBeNull();
-        let scopedWs: WebSocket | undefined;
-
-        try {
-          scopedWs = new WebSocket(`ws://127.0.0.1:${port}`);
-          trackConnectChallengeNonce(scopedWs);
-          await new Promise<void>((resolve) => {
-            scopedWs?.once("open", resolve);
-          });
-          await connectOk(scopedWs, {
-            scopes: ["operator.read", "operator.write"],
-          });
-
+        await withOperator(["operator.read", "operator.write"], async (scopedWs) => {
           const runId = `idem-write-scope-reset-${message}`;
           const finalPromise = onceMessage(
             scopedWs,
@@ -258,19 +241,15 @@ describe("gateway server chat", () => {
             }),
             finalPromise,
           ]);
-          expect(sendRes.ok).toBe(true);
-          expect(sendRes.payload?.status).toBe("started");
+          expect(sendRes).toMatchObject({ ok: true, payload: { status: "started" } });
 
           const waitRes = await rpcReq(scopedWs, "agent.wait", {
             runId,
             timeoutMs: 1_000,
           });
-          expect(waitRes.ok).toBe(true);
-          expect(waitRes.payload?.status).toBe("ok");
+          expect(waitRes).toMatchObject({ ok: true, payload: { status: "ok" } });
 
-          expect(
-            loadSessionEntry({ sessionKey: "agent:main:main", storePath: sessionStorePath }),
-          ).toMatchObject({ sessionId: "sess-main", ...resetState });
+          expect(sessionEntry()).toMatchObject({ sessionId: "sess-main", ...resetState });
           expect(runSpy).not.toHaveBeenCalled();
           expect(extractFirstTextBlock(final.payload?.message)).toMatch(/not authorized/i);
           expect(extractFirstTextBlock(final.payload?.message)).toContain("operator.admin");
@@ -281,14 +260,11 @@ describe("gateway server chat", () => {
               sessionKey: "main",
             },
           );
-          expect(history.ok).toBe(true);
-          expect(history.payload?.sessionId).toBe("sess-main");
+          expect(history).toMatchObject({ ok: true, payload: { sessionId: "sess-main" } });
           expect(collectHistoryTextValues(history.payload?.messages ?? [])).toContain(
             extractFirstTextBlock(final.payload?.message),
           );
-        } finally {
-          scopedWs?.close();
-        }
+        });
       });
     } finally {
       runSpy.mockRestore();
@@ -296,14 +272,9 @@ describe("gateway server chat", () => {
   });
 
   test("chat.send /reset on an idle session finishes post-commit cleanup and records the turn", async () => {
-    const { getReplyFromConfig } = await import("../auto-reply/reply/get-reply.js");
-    const { withFullRuntimeReplyConfig } =
-      await import("../auto-reply/reply/get-reply-fast-path.js");
+    await useRealReply();
     // Observe the harness reset that initSessionState runs after the reset commits.
     const harnessReset = vi.spyOn(harnessRegistry, "resetRegisteredAgentHarnessSessions");
-    mockGetReplyFromConfigOnce((ctx, opts, cfg) =>
-      getReplyFromConfig(ctx, opts, cfg ? withFullRuntimeReplyConfig(cfg) : cfg),
-    );
     try {
       await withMainSessionStore(async () => {
         const runId = "idem-admin-reset-idle";
@@ -371,8 +342,7 @@ describe("gateway server chat", () => {
         message: "hold this run open",
         idempotencyKey: runId,
       });
-      expect(agentRes.ok).toBe(true);
-      expect(agentRes.payload?.status).toBe("accepted");
+      expect(agentRes).toMatchObject({ ok: true, payload: { status: "accepted" } });
 
       const waitWhileAgentInFlight = await rpcReq(ws, "agent.wait", {
         runId,
@@ -444,15 +414,13 @@ describe("gateway server chat", () => {
         message: "seed stale agent snapshot",
         idempotencyKey: runId,
       });
-      expect(seedAgentRes.ok).toBe(true);
-      expect(seedAgentRes.payload?.status).toBe("accepted");
+      expect(seedAgentRes).toMatchObject({ ok: true, payload: { status: "accepted" } });
 
       const seedWaitRes = await rpcReq(ws, "agent.wait", {
         runId,
         timeoutMs: 1_000,
       });
-      expect(seedWaitRes.ok).toBe(true);
-      expect(seedWaitRes.payload?.status).toBe("ok");
+      expect(seedWaitRes).toMatchObject({ ok: true, payload: { status: "ok" } });
       await gatewaySuite.requestExecution.waitForCompletion(runId);
 
       const releaseBlockedReply = mockBlockedChatReply();

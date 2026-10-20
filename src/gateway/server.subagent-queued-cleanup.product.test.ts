@@ -1,8 +1,8 @@
 // Prove queued subagent Stop cleanup through real model, ingress, and control boundaries.
 import { X509Certificate } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, expect, it, vi } from "vitest";
+import { startOpenAiResponsesModelServer } from "../../test/helpers/openai-responses-model-fixture.js";
 import {
   writeOpenAiResponsesSse,
   writeOpenAiResponsesText,
@@ -97,15 +97,6 @@ function findSpawnReceipt(value: unknown): SpawnReceipt | undefined {
       return undefined;
     }
   }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const matched = findSpawnReceipt(item);
-      if (matched) {
-        return matched;
-      }
-    }
-    return undefined;
-  }
   if (value && typeof value === "object") {
     if (
       "status" in value &&
@@ -117,7 +108,7 @@ function findSpawnReceipt(value: unknown): SpawnReceipt | undefined {
     ) {
       return { childSessionKey: value.childSessionKey, runId: value.runId };
     }
-    for (const item of Object.values(value)) {
+    for (const item of Array.isArray(value) ? value : Object.values(value)) {
       const matched = findSpawnReceipt(item);
       if (matched) {
         return matched;
@@ -142,25 +133,21 @@ async function startYieldModelServer(allowYield: Promise<void>) {
   const childModelStarted = createDeferred();
   let yieldSent = false;
   let queuedInputRequests = 0;
-  const server = createServer((request, response) => {
-    void handleRequest(request, response).catch((error: unknown) => {
-      if (!response.headersSent) {
-        response.writeHead(500, { "content-type": "application/json" });
+  const server = await startOpenAiResponsesModelServer({
+    modelId: "stop-proof",
+    bindError: "Expected queued cleanup model server address",
+    onRequest: async (request, response) => {
+      try {
+        await handleRequest(request, response);
+      } catch (error) {
+        if (!response.headersSent) {
+          response.writeHead(500, { "content-type": "application/json" });
+        }
+        response.end(JSON.stringify({ error: { message: String(error) } }));
       }
-      response.end(JSON.stringify({ error: { message: String(error) } }));
-    });
+    },
   });
   async function handleRequest(request: IncomingMessage, response: ServerResponse) {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (request.method === "GET" && url.pathname === "/v1/models") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ data: [{ id: "stop-proof", object: "model" }] }));
-      return;
-    }
-    if (request.method !== "POST" || url.pathname !== "/v1/responses") {
-      response.writeHead(404).end();
-      return;
-    }
     const body = await readRequestBody(request);
     const parsed = JSON.parse(body) as unknown;
     if (body.includes(queuedInput)) {
@@ -194,23 +181,13 @@ async function startYieldModelServer(allowYield: Promise<void>) {
       messageId: `message-${responseSequence}`,
     });
   }
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address() as AddressInfo;
   return {
     childAccepted: childAccepted.promise,
     childModelStarted: childModelStarted.promise,
     hasSentYield: () => yieldSent,
     queuedInputRequests: () => queuedInputRequests,
-    url: `http://127.0.0.1:${address.port}/v1`,
-    close: async () => {
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    },
+    url: `${server.baseUrl}/v1`,
+    close: server.close,
   };
 }
 

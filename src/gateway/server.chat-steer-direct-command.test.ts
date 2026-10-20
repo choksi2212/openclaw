@@ -1,7 +1,7 @@
 import path from "node:path";
 import { isGatewayResponseFrame } from "@openclaw/gateway-protocol/frame-guards";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { createAssistantMessageEventStream, type Model } from "openclaw/plugin-sdk/llm";
+import { createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
 import { expect, it, onTestFinished, vi } from "vitest";
 import type { RawData } from "ws";
 import { createDeferred, withinTest } from "../../test/helpers/promise.js";
@@ -22,6 +22,7 @@ import {
 } from "../agents/sessions/agent-session-loop-correctness.test-support.js";
 import { runAnnounceAgentCall } from "../agents/subagents/announce/subagent-announce-completion-delivery.js";
 import { makeEmbeddedRunnerAttempt } from "../agents/test-helpers/embedded-agent-runner-e2e-fixtures.js";
+import { makeProviderModelFixture } from "../agents/test-helpers/provider-model-fixture.js";
 import { getRuntimeConfig, writeConfigFile } from "../config/config.js";
 import { getAgentRunContext } from "../infra/agent-run-registry.js";
 import { createDiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
@@ -111,18 +112,15 @@ it.for([
     const sessionKey = `agent:main:direct-steering-${source}`;
     const sessionId = `direct-steering-session-${source}`;
     const runId = `announce:direct-steering-${source}`;
-    const model: Model = {
+    const model = makeProviderModelFixture<"openai-responses">({
       id: "mock-1",
       name: "Steering fixture",
       provider: "steering-fixture",
       api: "openai-responses",
       baseUrl: "https://steering.example.test",
-      reasoning: false,
-      input: ["text"],
-      contextWindow: 16_000,
       maxTokens: 2_048,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    };
+    });
+    const { provider, baseUrl, api, ...modelDefinition } = model;
     testState.sessionStorePath = path.join(
       process.env.OPENCLAW_STATE_DIR!,
       "agents",
@@ -143,21 +141,11 @@ it.for([
       plugins: { ...config.plugins, enabled: false },
       models: {
         providers: {
-          [model.provider]: {
-            api: "openai-responses",
+          [provider]: {
+            api,
             apiKey: "synthetic-steering-key",
-            baseUrl: model.baseUrl,
-            models: [
-              {
-                id: model.id,
-                name: model.name,
-                reasoning: model.reasoning,
-                input: model.input,
-                cost: model.cost,
-                contextWindow: model.contextWindow,
-                maxTokens: model.maxTokens,
-              },
-            ],
+            baseUrl,
+            models: [modelDefinition],
           },
         },
       },
@@ -392,29 +380,19 @@ it.for([
         signal,
       );
       const registration = getEmbeddedRunAttachment(handle);
-      const facts = {
-        hasReplyOperation: getSessionControllerOperation(sessionKey) !== undefined,
-        authoritySource: registration?.toolAuthority?.source,
-        hasOperatorAuthority:
-          readAdmittedRunOperatorAuthority(attempt.admittedRunContext) !== undefined,
-        ownsAdmittedInstance:
-          registration?.operationalRunInstance ===
-          attempt.admittedRunContext.operationalRunInstance,
-        hasDelegatedAuthority: registration?.delegatedAuthority !== undefined,
-        isControlUiVisible: getAgentRunContext(runId)?.isControlUiVisible,
-        terminalReplyExpectation: handle.terminalReplyExpectation,
-        injectionVersion: handle.messageInjectionV2?.version,
-        supportsTranscriptCommitWait: handle.supportsTranscriptCommitWait,
-      };
-      expect(facts).toEqual({
-        hasReplyOperation: true,
-        authoritySource: "reply",
-        hasOperatorAuthority: source === "browser",
-        ownsAdmittedInstance: true,
-        hasDelegatedAuthority: true,
-        isControlUiVisible: true,
+      expect(getSessionControllerOperation(sessionKey)).toBeDefined();
+      expect(registration?.toolAuthority?.source).toBe("reply");
+      expect(readAdmittedRunOperatorAuthority(attempt.admittedRunContext) !== undefined).toBe(
+        source === "browser",
+      );
+      expect(registration?.operationalRunInstance).toBe(
+        attempt.admittedRunContext.operationalRunInstance,
+      );
+      expect(registration?.delegatedAuthority).toBeDefined();
+      expect(getAgentRunContext(runId)?.isControlUiVisible).toBe(true);
+      expect(handle).toMatchObject({
         terminalReplyExpectation: "result-required",
-        injectionVersion: 2,
+        messageInjectionV2: { version: 2 },
         supportsTranscriptCommitWait: true,
       });
       const response = await rpcReq(harness.ws, "chat.send", {
