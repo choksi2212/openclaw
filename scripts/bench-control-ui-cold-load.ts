@@ -465,6 +465,7 @@ try {
     permissions: ["local-network-access"],
   });
   const page = await context.newPage();
+  await page.addInitScript("globalThis.__name = (fn) => fn");
   const rigProbeScript = values["probe-dir"]
     ? (
         await Promise.all(
@@ -710,7 +711,6 @@ try {
     sessionKey: fixture.selectedSessionKey,
     sidebarView: sidebarView === "online" ? "online" : "sessions",
   };
-  await page.evaluate("globalThis.__name = (fn) => fn");
   const { storage: warmStorage, ...snapshotSave } = await page.evaluate(
     persistColdLoadWarmState,
     warmInput,
