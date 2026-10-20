@@ -74,7 +74,7 @@ import { exportChatMarkdown } from "./export.ts";
 import { admitChatSubmission } from "./history-merge.ts";
 import { admitInitialTurnHandoff } from "./initial-turn-handoff-admission.ts";
 import { subscribeInitialTurnHandoff } from "./initial-turn-handoff.ts";
-import { admitInitialChatSubmission } from "./run-lifecycle.ts";
+import { adoptAcknowledgedInitialRun, readAcknowledgedInitialRun } from "./run-lifecycle.ts";
 import { applyChatCacheSnapshot, readChatSessionSnapshot } from "./session-message-cache.ts";
 import { closeSlot } from "./sidebar-layout.ts";
 
@@ -337,6 +337,7 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
         // First-turn handoffs are scoped to their Gateway client and must be
         // claimed before attach starts outbox and transcript hydration.
         pageState.client = this.context.gateway.snapshot.client ?? null;
+        const initialRun = readAcknowledgedInitialRun(pageState);
         const snapshot = readChatSessionSnapshot(pageState.chatMessagesBySession, pageState, {
           sessionKey: initialSessionKey,
         });
@@ -353,7 +354,8 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
           pageState.lastError = CHAT_COMPOSER_DRAFT_STORAGE_ERROR;
           pageState.chatError = CHAT_COMPOSER_DRAFT_STORAGE_ERROR;
         }
-        admitInitialChatSubmission(pageState, getChatPendingInputs(pageState)?.page.items);
+        admitChatSubmission(pageState, getChatPendingInputs(pageState)?.page.items);
+        adoptAcknowledgedInitialRun(pageState, initialRun);
       }
     }
     chatState.attach(pageState);
@@ -574,6 +576,7 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
         // A retained pane owns one conversation for its lifetime. Only its
         // canonical spelling can change after Gateway defaults resolve.
         this.state.sessionKey = nextSessionKey;
+        const initialRun = readAcknowledgedInitialRun(this.state);
         const nextAgentId = parseAgentSessionKey(nextSessionKey)?.agentId;
         if (nextAgentId) {
           applyChatAgentOwnerTransition(this.state, nextAgentId);
@@ -584,7 +587,8 @@ export abstract class ChatPaneLifecycle extends ChatPaneSessionObservation {
         // would vanish instead of offering a retry, and the accepted prompt would
         // stay hidden until the transcript bootstrap resolved.
         const rejectedTurn = admitInitialTurnHandoff(this.state, nextSessionKey);
-        admitInitialChatSubmission(this.state, getChatPendingInputs(this.state)?.page.items);
+        admitChatSubmission(this.state, getChatPendingInputs(this.state)?.page.items);
+        adoptAcknowledgedInitialRun(this.state, initialRun);
         if (rejectedTurn) {
           this.state.lastError = CHAT_COMPOSER_DRAFT_STORAGE_ERROR;
           this.state.chatError = CHAT_COMPOSER_DRAFT_STORAGE_ERROR;
