@@ -27,18 +27,35 @@ import {
 const ownedAttachments: ChatAttachment[] = [];
 const previewBlobs = new Map<string, Blob>();
 
-function expectSameImageNodes(actual: HTMLImageElement[], expected: HTMLImageElement[]) {
+function expectImageNodes(actual: HTMLImageElement[], expected: HTMLImageElement[]) {
   expect(actual).toHaveLength(expected.length);
   for (const [index, image] of expected.entries()) {
     expect(actual[index]).toBe(image);
   }
 }
 
-function mediaMetadataResponse(
-  available = true,
-  mediaTicket?: string,
-  retryable = false,
-): Response {
+function imageEvent(image: HTMLImageElement, event = "load") {
+  image.dispatchEvent(new Event(event));
+}
+
+async function settleMedia() {
+  if (vi.isFakeTimers()) {
+    await vi.advanceTimersByTimeAsync(0);
+  } else {
+    await flushDeferredRowPrune();
+  }
+}
+
+async function publishedImage(response?: Response) {
+  const view = await imageFixture();
+  view.publish();
+  if (response) {
+    await view.receive(response);
+  }
+  return view;
+}
+
+function metadataResponse(available = true, mediaTicket?: string, retryable = false): Response {
   return Response.json({
     available,
     reason: available ? undefined : "Attachment removed",
@@ -103,27 +120,27 @@ function mountTranscriptPane(props: ChatThreadProps) {
   return { container, renderPane, setConnected };
 }
 
-type ImageTranscript = Awaited<ReturnType<typeof createCanonicalImageTranscript>>;
+type ImageTranscript = Awaited<ReturnType<typeof imageFixture>>;
 
 function changeImage(
-  fixture: ImageTranscript,
+  view: ImageTranscript,
   change: "removal" | "replacement" | "auth" | "connection epoch" | "session",
 ) {
   if (change === "removal") {
-    fixture.publish({}, []);
+    view.publish({}, []);
   } else if (change === "replacement") {
-    fixture.publish({}, [
+    view.publish({}, [
       { path: `media://inbound/${crypto.randomUUID()}.png`, contentType: "image/png" },
     ]);
   } else {
     if (change === "auth") {
-      fixture.props.assistantAttachmentAuthToken = "rotated-token";
+      view.props.assistantAttachmentAuthToken = "rotated-token";
     } else if (change === "connection epoch") {
-      fixture.props.connectionEpoch = 2;
+      view.props.connectionEpoch = 2;
     } else {
-      fixture.props.sessionKey = "agent:main:other";
+      view.props.sessionKey = "agent:main:other";
     }
-    fixture.renderPane();
+    view.renderPane();
   }
 }
 
@@ -137,7 +154,7 @@ async function withMediaTimers(run: () => Promise<void>) {
   }
 }
 
-async function createCanonicalImageTranscript(
+async function imageFixture(
   factIndexes = [0],
   inlineUrls = ["data:image/png;base64,aW5saW5l"],
   origin: "canonical" | "queued" | "submitted" | "initial receipt" = "canonical",
@@ -186,17 +203,16 @@ async function createCanonicalImageTranscript(
   } else if (origin === "submitted") {
     reduceChatSessionProjection(owner, { type: "sendPending", runId: input.runId, message: local });
   }
-  const media: Array<{ path: string; contentType: string; fileName?: string } | null> = Array.from(
-    { length: Math.max(...factIndexes) + 1 },
-    (_, index) =>
-      factIndexes.includes(index)
-        ? {
-            path: `media://inbound/${crypto.randomUUID()}.png`,
-            contentType: "image/png",
-            fileName: `image-${factIndexes.indexOf(index)}.png`,
-          }
-        : null,
-  );
+  const media = Array<{ path: string; contentType: string; fileName?: string } | null>(
+    Math.max(...factIndexes) + 1,
+  ).fill(null);
+  factIndexes.forEach((factIndex, index) => {
+    media[factIndex] = {
+      path: `media://inbound/${crypto.randomUUID()}.png`,
+      contentType: "image/png",
+      fileName: `image-${index}.png`,
+    };
+  });
   const props = {
     ...threadProps(
       `pane-${crypto.randomUUID()}`,
@@ -236,7 +252,7 @@ async function createCanonicalImageTranscript(
   for (const image of displayed) {
     // jsdom has no decoder; deliver the browser's successful load boundary.
     Object.defineProperty(image, "naturalWidth", { value: 1 });
-    image.dispatchEvent(new Event("load"));
+    imageEvent(image);
   }
   const publish = (
     metadata: Record<string, unknown> = {},
@@ -274,6 +290,17 @@ async function createCanonicalImageTranscript(
     publish,
     renderPane,
     setConnected,
+    expectImages: (expected = displayed) => expectImageNodes(images(), expected),
+    receive: async (response = metadataResponse(), index = 0) => {
+      requests[index]?.resolve(response);
+      await settleMedia();
+    },
+    expectEmpty: (reason?: string) => {
+      expect(images()).toHaveLength(0);
+      if (reason) {
+        expect(container.textContent).toContain(reason);
+      }
+    },
   };
 }
 
@@ -307,83 +334,80 @@ describe("canonical image presentation handoff", () => {
   it.each(["inline", "metadata", "loaded"] as const)(
     "keeps the displayed %s upload when the session workspace arrives",
     async (stage) => {
-      const fixture = await createCanonicalImageTranscript(undefined, undefined, "initial receipt");
+      const view = await imageFixture(undefined, undefined, "initial receipt");
       if (stage !== "inline") {
-        fixture.publish();
+        view.publish();
       }
       if (stage === "loaded") {
-        fixture.requests[0]?.resolve(mediaMetadataResponse(true, "before-workspace"));
-        await flushDeferredRowPrune();
-        fixture.displayed[0]?.dispatchEvent(new Event("load"));
+        await view.receive(metadataResponse(true, "before-workspace"));
+        imageEvent(view.displayed[0]!);
       }
 
-      fixture.props.selectedSession = {
-        key: fixture.props.sessionKey,
+      view.props.selectedSession = {
+        key: view.props.sessionKey,
         kind: "direct",
         permissionMode: "workspace",
         sessionRoot: "/worktrees/image-upload",
         spawnedCwd: "/worktrees/image-upload",
       };
-      fixture.renderPane();
-      expectSameImageNodes(fixture.images(), fixture.displayed);
-      expect(fixture.container.querySelector('[aria-busy="true"]')).toBeNull();
+      view.renderPane();
+      view.expectImages();
+      expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
 
       if (stage === "inline") {
-        fixture.publish();
-        expectSameImageNodes(fixture.images(), fixture.displayed);
+        view.publish();
+        view.expectImages();
       } else {
-        expect(fixture.requests).toHaveLength(2);
+        expect(view.requests).toHaveLength(2);
       }
       // The retained pixels do not suppress the new policy's access check.
-      fixture.requests.at(-1)?.resolve(mediaMetadataResponse(false));
-      await flushDeferredRowPrune();
-      expect(fixture.images()).toHaveLength(0);
-      expect(fixture.container.textContent).toContain("Attachment removed");
+      await view.receive(metadataResponse(false), view.requests.length - 1);
+      view.expectEmpty("Attachment removed");
     },
   );
 
   it.each([
-    {
-      name: "different canonical ID with identical text and send key",
-      metadata: { id: "different-native-id" },
-    },
-    { name: "different canonical sequence", metadata: { seq: 2 } },
-    { name: "missing persisted ID", metadata: { id: undefined } },
-    { name: "imported message identity", metadata: { importedFrom: "external" } },
-    {
-      name: "imported message replacing a queued send",
-      metadata: {
+    [
+      "different canonical ID with identical text and send key",
+      { id: "different-native-id" },
+      undefined,
+    ],
+    ["different canonical sequence", { seq: 2 }, undefined],
+    ["missing persisted ID", { id: undefined }, undefined],
+    ["imported identity", { importedFrom: "external" }, undefined],
+    [
+      "import replacing queued send",
+      {
         importedFrom: "external",
         cliSessionId: "imported-session",
         externalId: "imported-image",
       },
-      origin: "queued" as const,
-    },
-    { name: "pending message identity", metadata: { id: "pending:input" } },
-    { name: "missing layout", metadata: { mediaImageLayout: undefined } },
-  ])("does not borrow an inline preview for $name", async ({ metadata, origin }) => {
-    const fixture = await createCanonicalImageTranscript(undefined, undefined, origin);
-    fixture.publish(metadata, fixture.media, "Cached text");
-    expect(fixture.images()).toHaveLength(0);
-    expect(fixture.container.querySelector('[aria-busy="true"]')).not.toBeNull();
+      "queued",
+    ],
+    ["pending identity", { id: "pending:input" }, undefined],
+    ["missing layout", { mediaImageLayout: undefined }, undefined],
+  ] as const)("does not borrow an inline preview for %s", async (_name, metadata, origin) => {
+    const view = await imageFixture(undefined, undefined, origin);
+    view.publish(metadata, view.media, "Cached text");
+    expect(view.images()).toHaveLength(0);
+    expect(view.container.querySelector('[aria-busy="true"]')).not.toBeNull();
   });
 
   it("does not lend a displayed inline image to another pane of the same canonical message", async () => {
-    const fixture = await createCanonicalImageTranscript();
-    fixture.publish();
-    const { container } = mountTranscriptPane({ ...fixture.props, paneId: "other-image-pane" });
-    expectSameImageNodes(fixture.images(), fixture.displayed);
+    const view = await publishedImage();
+    const { container } = mountTranscriptPane({ ...view.props, paneId: "other-image-pane" });
+    view.expectImages();
     expect(container.querySelector(".chat-message-image")).toBeNull();
-    expect(fixture.requests).toHaveLength(1);
+    expect(view.requests).toHaveLength(1);
   });
 
   it("binds local previews by fact position when inline blocks reorder mixed image receipts", async () => {
-    const fixture = await createCanonicalImageTranscript(
+    const view = await imageFixture(
       [0, 1],
       ["data:image/png;base64,aW1hZ2VB", "data:image/png;base64,aW1hZ2VC"],
       "queued",
     );
-    fixture.publish(
+    view.publish(
       {
         mediaImageLayout: {
           slots: [
@@ -392,195 +416,146 @@ describe("canonical image presentation handoff", () => {
           ],
         },
       },
-      fixture.media,
+      view.media,
       "Fresh authoritative text",
-      [{ type: "image", url: expectDefined(fixture.media[1], "inline image fact").path }],
+      [{ type: "image", url: expectDefined(view.media[1], "inline image fact").path }],
     );
 
-    expectSameImageNodes(fixture.images(), fixture.displayed.toReversed());
-    expect(fixture.images().map((image) => image.getAttribute("src"))).toEqual(
-      fixture.previewUrls.toReversed(),
+    view.expectImages(view.displayed.toReversed());
+    expect(view.images().map((image) => image.getAttribute("src"))).toEqual(
+      view.previewUrls.toReversed(),
     );
   });
 
   it("adopts submitted images across interleaved non-image fact slots", async () => {
-    const fixture = await createCanonicalImageTranscript(
+    const view = await imageFixture(
       [1, 3],
       ["data:image/png;base64,YQ==", "data:image/png;base64,Yg=="],
       "submitted",
     );
-    fixture.publish();
-    expectSameImageNodes(fixture.images(), fixture.displayed);
+    view.publish();
+    view.expectImages();
+  });
+
+  it("retains sparse reordered duplicate slots through reversed completion and removal", async () => {
+    const factIndexes = [2, 0, 3];
+    const inlineUrls = ["YQ==", "Yg==", "YQ=="].map((bytes) => `data:image/png;base64,${bytes}`);
+    const view = await imageFixture(factIndexes, inlineUrls);
+    view.media[3] = view.media[2] ?? null;
+    view.publish();
+    const sourceOrder = [1, 0, 2];
+    const expected = sourceOrder.map((index) =>
+      expectDefined(view.displayed[index], "displayed slot"),
+    );
+    view.expectImages(expected);
+    expect(view.images().map((image) => image.getAttribute("src"))).toEqual(
+      sourceOrder.map((index) => view.previewUrls[index]),
+    );
+
+    for (const request of view.requests.toReversed()) {
+      request.resolve(metadataResponse());
+      await flushDeferredRowPrune();
+      view.expectImages(expected);
+    }
+    for (const image of expected.toReversed()) {
+      imageEvent(image);
+      view.expectImages(expected);
+    }
+    for (const [index, factIndex] of [0, 2, 3].entries()) {
+      expect(view.images()[index]?.getAttribute("src")).toContain(
+        encodeURIComponent(expectDefined(view.media[factIndex], "canonical media fact").path),
+      );
+    }
+    view.publish(
+      {},
+      view.media.map((fact, index) => (index === 0 ? null : fact)),
+    );
+    view.expectImages(expected.slice(1));
   });
 
   it.each([
-    {
-      name: "sparse reordered facts with duplicate previews and references",
-      factIndexes: [2, 0, 3],
-      inlineUrls: [
-        "data:image/png;base64,YQ==",
-        "data:image/png;base64,Yg==",
-        "data:image/png;base64,YQ==",
-      ],
-    },
-  ])(
-    "retains exact slots for $name through reversed completion and removal",
-    async ({ factIndexes, inlineUrls }) => {
-      const fixture = await createCanonicalImageTranscript(factIndexes, inlineUrls);
-      const firstIndexByUrl = new Map<string, number>();
-      for (const [index, url] of inlineUrls.entries()) {
-        const factIndex = expectDefined(factIndexes[index], "image fact index");
-        const firstIndex = firstIndexByUrl.get(url);
-        if (firstIndex === undefined) {
-          firstIndexByUrl.set(url, factIndex);
-        } else {
-          fixture.media[factIndex] = fixture.media[firstIndex] ?? null;
-        }
-      }
-      fixture.publish();
-      const order = factIndexes
-        .map((factIndex, index) => ({ factIndex, index }))
-        .toSorted((a, b) => a.factIndex - b.factIndex);
-      const expected = order.map(({ index }) =>
-        expectDefined(fixture.displayed[index], "displayed slot"),
-      );
-      expectSameImageNodes(fixture.images(), expected);
-      expect(fixture.images().map((image) => image.getAttribute("src"))).toEqual(
-        order.map(({ index }) => fixture.previewUrls[index]),
-      );
-
-      for (const request of fixture.requests.toReversed()) {
-        request.resolve(mediaMetadataResponse());
+    ["auth", false],
+    ["connection epoch", false],
+    ["session", false],
+    ["removal", true],
+    ["auth", true],
+    ["replacement", true],
+    ["connection epoch", true],
+  ] as const)(
+    "retires images on %s and ignores late resources (native=%s)",
+    async (change, native) => {
+      const view = await publishedImage(native ? metadataResponse() : undefined);
+      view.expectImages();
+      const old = expectDefined(view.requests[0], "pending metadata");
+      changeImage(view, change);
+      view.expectEmpty();
+      if (native) {
+        imageEvent(view.displayed[0]!);
+        imageEvent(view.displayed[0]!, "error");
         await flushDeferredRowPrune();
-        expectSameImageNodes(fixture.images(), expected);
+        view.expectEmpty();
+        return;
       }
-      for (const image of expected.toReversed()) {
-        image.dispatchEvent(new Event("load"));
-        expectSameImageNodes(fixture.images(), expected);
-      }
-      for (const [index, { factIndex }] of order.entries()) {
-        expect(fixture.images()[index]?.getAttribute("src")).toContain(
-          encodeURIComponent(expectDefined(fixture.media[factIndex], "canonical media fact").path),
-        );
-      }
-      fixture.publish(
-        {},
-        fixture.media.map((fact, index) => (index === order[0]?.factIndex ? null : fact)),
-      );
-      expectSameImageNodes(fixture.images(), expected.slice(1));
-    },
-  );
-
-  it.each(["auth", "connection epoch", "session"] as const)(
-    "clears retained inline presentation on %s change and ignores old metadata",
-    async (change) => {
-      const fixture = await createCanonicalImageTranscript();
-      fixture.publish();
-      expectSameImageNodes(fixture.images(), fixture.displayed);
-      const old = expectDefined(fixture.requests[0], "pending metadata");
-      changeImage(fixture, change);
-      expect(fixture.images()).toHaveLength(0);
       expect(old.signal?.aborted).toBe(true);
-      old.resolve(mediaMetadataResponse());
+      old.resolve(metadataResponse());
       await flushDeferredRowPrune();
-      expect(fixture.images()).toHaveLength(0);
-      fixture.requests.at(-1)?.resolve(mediaMetadataResponse());
-      await flushDeferredRowPrune();
-      expect(fixture.images()).toHaveLength(1);
-      expect(fixture.images()[0]).not.toBe(fixture.displayed[0]);
+      view.expectEmpty();
+      await view.receive(metadataResponse(), view.requests.length - 1);
+      expect(view.images()).toHaveLength(1);
+      expect(view.images()[0]).not.toBe(view.displayed[0]);
     },
   );
 
   it.each(["removal", "replacement", "disconnect", "denial"] as const)(
     "clears an exact image handoff on %s without resurrection",
     async (change) => {
-      const fixture = await createCanonicalImageTranscript();
-      fixture.publish();
-      expectSameImageNodes(fixture.images(), fixture.displayed);
-      const old = expectDefined(fixture.requests[0], "pending metadata");
+      const view = await publishedImage();
+      view.expectImages();
+      const old = expectDefined(view.requests[0], "pending metadata");
       if (change === "disconnect") {
-        fixture.setConnected(false);
-        fixture.container.remove();
+        view.setConnected(false);
+        view.container.remove();
         await flushDeferredRowPrune();
-        document.body.append(fixture.container);
-        fixture.setConnected(true);
+        document.body.append(view.container);
+        view.setConnected(true);
       } else if (change !== "denial") {
-        changeImage(fixture, change);
+        changeImage(view, change);
       }
       if (change !== "denial") {
         expect(old.signal?.aborted).toBe(true);
-        expect(fixture.images()).toHaveLength(0);
+        view.expectEmpty();
       }
-      old.resolve(mediaMetadataResponse(change !== "denial"));
+      old.resolve(metadataResponse(change !== "denial"));
       await flushDeferredRowPrune();
-      expect(fixture.images()).toHaveLength(0);
-      if (change === "denial") {
-        expect(fixture.container.textContent).toContain("Attachment removed");
-      }
-    },
-  );
-
-  it.each(["removal", "auth", "replacement", "connection epoch"] as const)(
-    "retires a pending native image on %s and ignores its late load and error",
-    async (change) => {
-      const fixture = await createCanonicalImageTranscript();
-      fixture.publish();
-      fixture.requests[0]?.resolve(mediaMetadataResponse());
-      await flushDeferredRowPrune();
-      const displayed = expectDefined(fixture.displayed[0], "pending native image");
-      expectSameImageNodes(fixture.images(), fixture.displayed);
-      changeImage(fixture, change);
-      displayed.dispatchEvent(new Event("load"));
-      displayed.dispatchEvent(new Event("error"));
-      await flushDeferredRowPrune();
-      expect(fixture.images()).toHaveLength(0);
+      view.expectEmpty(change === "denial" ? "Attachment removed" : undefined);
     },
   );
 
   it.each([
-    {
-      name: "renewal",
-      response: () => mediaMetadataResponse(true, "after-refresh"),
-      reason: undefined,
-    },
-    {
-      name: "denial",
-      response: () => mediaMetadataResponse(false),
-      reason: "Attachment removed",
-    },
-    {
-      name: "retryable denial",
-      response: () => mediaMetadataResponse(false, undefined, true),
-      reason: "Attachment removed",
-    },
-    ...[401].map((status) => ({
-      name: `HTTP ${status} with an unreadable body`,
-      response: () => unreadableMetadataResponse(status),
-      reason: "Unavailable",
-    })),
-  ])("updates native image presentation after metadata ticket $name", ({ response, reason }) =>
-    withMediaTimers(async () => {
-      const fixture = await createCanonicalImageTranscript();
-      fixture.publish();
-      fixture.requests[0]?.resolve(mediaMetadataResponse(true, "before-refresh"));
-      await vi.advanceTimersByTimeAsync(0);
-      const displayed = expectDefined(fixture.displayed[0], "displayed image");
-      displayed.dispatchEvent(new Event("load"));
-      await vi.advanceTimersByTimeAsync(1_000);
-      fixture.requests[1]?.resolve(response());
-      await vi.advanceTimersByTimeAsync(0);
-      if (reason) {
-        displayed.dispatchEvent(new Event("load"));
-        expect(fixture.images()).toHaveLength(0);
-        expect(fixture.container.textContent).toContain(reason);
-        await vi.advanceTimersByTimeAsync(5_000);
-        expect(fixture.images()).toHaveLength(0);
-      } else {
-        expectSameImageNodes(fixture.images(), fixture.displayed);
-        expect(displayed.getAttribute("src")).toContain("mediaTicket=after-refresh");
-        displayed.dispatchEvent(new Event("load"));
-      }
-    }),
+    ["renewal", () => metadataResponse(true, "after-refresh"), undefined],
+    ["denial", () => metadataResponse(false), "Attachment removed"],
+    ["retryable denial", () => metadataResponse(false, undefined, true), "Attachment removed"],
+    ["HTTP 401 with an unreadable body", () => unreadableMetadataResponse(401), "Unavailable"],
+  ] as const)(
+    "updates native image presentation after metadata ticket %s",
+    (_name, response, reason) =>
+      withMediaTimers(async () => {
+        const view = await publishedImage(metadataResponse(true, "before-refresh"));
+        const displayed = expectDefined(view.displayed[0], "displayed image");
+        imageEvent(displayed);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await view.receive(response(), 1);
+        if (reason) {
+          imageEvent(displayed);
+          view.expectEmpty(reason);
+          await vi.advanceTimersByTimeAsync(5_000);
+          view.expectEmpty();
+        } else {
+          view.expectImages();
+          expect(displayed.getAttribute("src")).toContain("mediaTicket=after-refresh");
+          imageEvent(displayed);
+        }
+      }),
   );
 
   it.each([
@@ -590,36 +565,27 @@ describe("canonical image presentation handoff", () => {
     "keeps a loaded $presentation image through $failure renewal and expiry",
     ({ presentation, responseStatus }) =>
       withMediaTimers(async () => {
-        const fixture = await createCanonicalImageTranscript(
-          undefined,
-          presentation === "canonical" ? [] : undefined,
-        );
-        fixture.publish();
+        const view = await imageFixture(undefined, presentation === "canonical" ? [] : undefined);
+        view.publish();
         await vi.advanceTimersByTimeAsync(0);
-        fixture.requests[0]?.resolve(mediaMetadataResponse(true, "before-offline"));
-        await vi.advanceTimersByTimeAsync(0);
-        const displayed = expectDefined(fixture.images()[0], "loaded canonical image");
+        await view.receive(metadataResponse(true, "before-offline"));
+        const displayed = expectDefined(view.images()[0], "loaded canonical image");
         expect(displayed.getAttribute("src")).toContain("mediaTicket=before-offline");
         Object.defineProperty(displayed, "naturalWidth", { value: 1 });
-        displayed.dispatchEvent(new Event("load"));
+        imageEvent(displayed);
         vi.mocked(fetch).mockImplementation(async () => {
           if (responseStatus === null) {
             throw new TypeError("Gateway offline");
           }
-          if (responseStatus === 200) {
-            return unreadableMetadataResponse();
-          }
           return new Response("Service temporarily unavailable", { status: responseStatus });
         });
 
-        // Exhaust renewals before the 31-second fixture ticket expires.
-        await vi.advanceTimersByTimeAsync(11_000);
-        expectSameImageNodes(fixture.images(), [displayed]);
-        expect(fixture.container.querySelector(".chat-assistant-attachment-card")).toBeNull();
-
-        await vi.advanceTimersByTimeAsync(20_001);
-        expectSameImageNodes(fixture.images(), [displayed]);
-        expect(fixture.container.querySelector(".chat-assistant-attachment-card")).toBeNull();
+        // Exhaust renewals, then cross the 31-second view ticket's expiry.
+        for (const elapsed of [11_000, 20_001]) {
+          await vi.advanceTimersByTimeAsync(elapsed);
+          view.expectImages([displayed]);
+          expect(view.container.querySelector(".chat-assistant-attachment-card")).toBeNull();
+        }
       }),
   );
 
@@ -627,22 +593,19 @@ describe("canonical image presentation handoff", () => {
     "ends the retained handoff on %s and recovers only after explicit retry",
     (failure) =>
       withMediaTimers(async () => {
-        const fixture = await createCanonicalImageTranscript();
-        fixture.publish();
-        fixture.requests[0]?.resolve(mediaMetadataResponse());
-        await vi.advanceTimersByTimeAsync(0);
-        const displayed = expectDefined(fixture.displayed[0], "pending native image");
+        const view = await publishedImage(metadataResponse());
+        const displayed = expectDefined(view.displayed[0], "pending native image");
         if (failure === "native load error") {
-          displayed.dispatchEvent(new Event("error"));
+          imageEvent(displayed, "error");
           await vi.advanceTimersByTimeAsync(0);
         } else {
           await vi.advanceTimersByTimeAsync(29_999);
-          expectSameImageNodes(fixture.images(), fixture.displayed);
+          view.expectImages();
           await vi.advanceTimersByTimeAsync(1);
         }
-        expect(fixture.images()).toHaveLength(0);
+        view.expectEmpty();
         const card = expectDefined(
-          fixture.container.querySelector(".chat-assistant-attachment-card--recoverable"),
+          view.container.querySelector(".chat-assistant-attachment-card--recoverable"),
           "recoverable image failure",
         );
         expect(card.textContent).toContain("Could not load this image. Try again.");
@@ -650,37 +613,33 @@ describe("canonical image presentation handoff", () => {
           card.querySelector<HTMLButtonElement>(".chat-assistant-attachment-card__retry"),
           "explicit Retry button",
         );
-        displayed.dispatchEvent(new Event("load"));
-        fixture.renderPane();
+        imageEvent(displayed);
+        view.renderPane();
         notifyBrowserAuthRestored();
         await vi.advanceTimersByTimeAsync(15_000);
-        expect(fixture.images()).toHaveLength(0);
-        expect(fixture.requests).toHaveLength(1);
+        view.expectEmpty();
+        expect(view.requests).toHaveLength(1);
 
         retry.click();
         await vi.advanceTimersByTimeAsync(0);
-        expect(fixture.requests).toHaveLength(2);
-        expect(fixture.images()).toHaveLength(0);
-        fixture.requests[1]?.resolve(mediaMetadataResponse(true, "after-explicit-retry"));
-        await vi.advanceTimersByTimeAsync(0);
-        const recovered = expectDefined(fixture.images()[0], "retried native image");
+        expect(view.requests).toHaveLength(2);
+        view.expectEmpty();
+        await view.receive(metadataResponse(true, "after-explicit-retry"), 1);
+        const recovered = expectDefined(view.images()[0], "retried native image");
         expect(recovered).not.toBe(displayed);
         expect(recovered.getAttribute("src")).toContain("mediaTicket=after-explicit-retry");
-        recovered.dispatchEvent(new Event("load"));
-        expectSameImageNodes(fixture.images(), [recovered]);
+        imageEvent(recovered);
+        view.expectImages([recovered]);
       }),
   );
 
   it("keeps a successfully loaded native image after the handoff deadline", () =>
     withMediaTimers(async () => {
-      const fixture = await createCanonicalImageTranscript();
-      fixture.publish();
-      fixture.requests[0]?.resolve(mediaMetadataResponse());
-      await vi.advanceTimersByTimeAsync(0);
-      const displayed = expectDefined(fixture.displayed[0], "pending native image");
-      displayed.dispatchEvent(new Event("load"));
+      const view = await publishedImage(metadataResponse());
+      const displayed = expectDefined(view.displayed[0], "pending native image");
+      imageEvent(displayed);
       await vi.advanceTimersByTimeAsync(30_000);
-      expectSameImageNodes(fixture.images(), [displayed]);
-      expect(fixture.container.querySelector('[aria-busy="true"]')).toBeNull();
+      view.expectImages([displayed]);
+      expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
     }));
 });
