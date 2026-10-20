@@ -23,10 +23,8 @@ vi.mock("../../../infra/outbound/message.js", async (importOriginal) => ({
   sendMessage: vi.fn(),
 }));
 
-it("settles a direct child result before its mirror waits behind the requester's controller turn", async ({
-  signal,
-}) => {
-  await withOpenClawTestState({ label: "direct-completion-mirror" }, async (state) => {
+it("settles child delivery before a blocked requester mirror", ({ signal }) =>
+  withOpenClawTestState({ label: "direct-completion-mirror" }, async (state) => {
     const target = {
       agentId: "main",
       sessionId: "requester",
@@ -151,5 +149,4 @@ it("settles a direct child result before its mirror waits behind the requester's
       await Promise.allSettled([turn, settleMirrors()]);
       send.mockReset();
     }
-  });
-});
+  }));

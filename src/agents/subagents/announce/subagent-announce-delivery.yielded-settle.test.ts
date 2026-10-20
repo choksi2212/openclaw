@@ -157,18 +157,17 @@ it.each([
   if ("replaced" in testCase) {
     expect(dispatch).not.toHaveBeenCalled();
   } else {
-    expect(dispatch.mock.calls[0]?.[2]).toMatchObject({
-      replyExpectation: "public" in testCase ? "required" : "optional",
-    });
-    const agentParams = dispatch.mock.calls[0]?.[1];
-    expect(agentParams).toMatchObject({
-      deliver: true,
-      channel: "discord",
-      to,
-      ...("public" in testCase ? {} : { expectedExistingSessionId: "requester-session-dm" }),
-    });
+    expect(dispatch.mock.calls[0]?.slice(1)).toMatchObject([
+      {
+        deliver: true,
+        channel: "discord",
+        to,
+        ...("public" in testCase ? {} : { expectedExistingSessionId: "requester-session-dm" }),
+      },
+      { replyExpectation: "public" in testCase ? "required" : "optional" },
+    ]);
     // The conversation's configured reply policy decides, not this handoff.
-    expect(agentParams).not.toHaveProperty("sourceReplyDeliveryMode");
+    expect(dispatch.mock.calls[0]?.[1]).not.toHaveProperty("sourceReplyDeliveryMode");
   }
   expect(send).not.toHaveBeenCalled();
 });

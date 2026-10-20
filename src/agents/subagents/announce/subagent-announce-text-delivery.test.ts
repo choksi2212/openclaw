@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement as beforeSettled } from "../../../../test/helpers/promise.js";
 import { chunkText } from "../../../auto-reply/chunk.js";
 import * as transcript from "../../../infra/outbound/deliver-transcript.js";
 import { setActivePluginRegistry } from "../../../plugins/runtime.js";
@@ -77,12 +78,7 @@ it("reports complete delivery before transcript mirroring settles", async () => 
   });
   const delivery = fixture.deliver();
   try {
-    await Promise.race([
-      mirrorEntered.promise,
-      delivery.then(() => {
-        throw new Error("Delivery settled without entering its mirror");
-      }),
-    ]);
+    await beforeSettled(mirrorEntered.promise, delivery, "Delivery missed its mirror");
     expect(fixture.sendText).toHaveBeenCalledTimes(2);
     expect(fixture.received.join(" ")).toBe(content);
     expect(fixture.onDeliveryResult).toHaveBeenCalledExactlyOnceWith(

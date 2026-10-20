@@ -1824,9 +1824,18 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(agentParams.sourceReplyDeliveryMode).toBeUndefined();
   });
 
-  const identifiedSend = new OutboundDeliveryError("connect ECONNRESET", {
-    cause: new Error("connect ECONNRESET"),
-    results: [{ channel: "telegram", messageId: "msg-already-sent" }],
+  const transient = new Error("connect ECONNRESET");
+  const permanent = new Error("chat not found");
+  const wrapped = (cause: Error) => new Error("outbound delivery failed", { cause });
+  const identifiedSend = (message: string, channel: "telegram" | "discord") =>
+    new OutboundDeliveryError(message, {
+      cause: new Error(message),
+      results: [{ channel, messageId: "already-sent" }],
+    });
+  const identifiedError = identifiedSend("connect ECONNRESET", "telegram");
+  const rejected = new PlatformMessageNotDispatchedError("payload rejected by platform policy", {
+    cause: transient,
+    retryable: false,
   });
   const writerRebound = (cause?: Error) =>
     Object.assign(
@@ -1841,66 +1850,40 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     outcome: "permanent_failure" | "ambiguous" | "retryable",
     route?: "active" | "direct",
   ];
-  // A failed dispatch is recorded once; these cases pin its classification.
   it.each<FailureCase>([
     [
-      "leaves a parent restart admission race retryable for the lifecycle owner",
+      "parent restart admission race",
       new Error(
         'Session "agent:main:main" changed while starting work. Retry. | SESSION_WORK_START_CHANGED',
       ),
       "retryable",
     ],
+    ["wrapped permanent failure", wrapped(permanent), "permanent_failure"],
+    ["typed rejection beats transient cause", wrapped(rejected), "permanent_failure"],
+    ["identified platform send", identifiedError, "ambiguous"],
     [
-      "classifies wrapped permanent channel failures as permanent",
-      new Error("outbound delivery failed", { cause: new Error("chat not found") }),
-      "permanent_failure",
-    ],
-    [
-      "honors typed permanent rejection over a transient-looking cause",
-      new Error("outbound delivery failed", {
-        cause: new PlatformMessageNotDispatchedError("payload rejected by platform policy", {
-          cause: new Error("connect ECONNRESET"),
-          retryable: false,
-        }),
-      }),
-      "permanent_failure",
-    ],
-    ["never retries after an identified outbound platform send", identifiedSend, "ambiguous"],
-    [
-      "never retries after a nested visible reply receipt",
+      "nested visible reply",
       new Error("connect ECONNRESET", {
         cause: Object.assign(new Error("platform send completed"), { visibleReplySent: true }),
       }),
       "ambiguous",
     ],
+    ["writer rebound after send", writerRebound(identifiedError), "ambiguous", "active"],
+    ["writer rebound", writerRebound(), "retryable"],
     [
-      "does not retry writer rebound with send evidence",
-      writerRebound(identifiedSend),
-      "ambiguous",
-      "active",
-    ],
-    ["keeps writer rebound retryable after one dispatch", writerRebound(), "retryable"],
-    [
-      "keeps wrapped writer rebound retryable after one dispatch",
+      "wrapped writer rebound",
       new Error("requester handoff failed", { cause: writerRebound() }),
       "retryable",
     ],
+    ["writer rebound with permanent cause", writerRebound(permanent), "permanent_failure"],
     [
-      "keeps a permanent cause of writer rebound permanent",
-      writerRebound(new Error("chat not found")),
-      "permanent_failure",
-    ],
-    [
-      "does not text-fallback after an identified incomplete platform send",
-      new OutboundDeliveryError("incomplete terminal response", {
-        cause: new Error("incomplete terminal response"),
-        results: [{ channel: "discord", messageId: "already-sent" }],
-      }),
+      "identified incomplete send",
+      identifiedSend("incomplete terminal response", "discord"),
       "ambiguous",
       "direct",
     ],
     [
-      "detects sentBeforeError on writer rebound and prevents retry",
+      "writer rebound sent marker",
       Object.assign(writerRebound(), { sentBeforeError: true }),
       "ambiguous",
     ],
