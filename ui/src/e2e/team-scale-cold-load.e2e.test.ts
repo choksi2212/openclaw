@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { asRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Page } from "playwright";
 import { expect, it } from "vitest";
@@ -5,6 +6,7 @@ import {
   persistColdLoadWarmState,
   restoreColdLoadWarmState,
 } from "../../../scripts/lib/control-ui-bench-warm-state.ts";
+import { buildSandboxHostPath } from "../../../src/agents/sandbox-host.js";
 import {
   controlUiBundledSettingsStorageKey,
   controlUiSessionUrl,
@@ -94,10 +96,19 @@ async function readStoredWarmState({ sessionKey }: { sessionKey: string }) {
 suite.define(() => {
   const sandbox = useCanvasSandboxFixture();
 
-  it("loads a paged Team roster, pinned dashboards, plugins, and inline widgets through a deep link", async () => {
+  it("loads a paged Team roster, pinned MCP dashboard, plugins, and inline widgets through a deep link", async () => {
     const fixture = createControlUiTeamScaleFixture({
       baseUrl: suite.server.baseUrl,
       ...sandbox(""),
+      sandboxUrl: buildSandboxHostPath({
+        blockDescendantFrames: true,
+        resourceDomains: [new URL(suite.server.baseUrl).origin],
+      }),
+      dashboardMcpApp: {
+        font: await readFile(
+          new URL("../../public/fonts/space-grotesk-latin.woff2", import.meta.url),
+        ),
+      },
     });
     await suite.withPage(
       {
@@ -210,11 +221,19 @@ suite.define(() => {
         await onlineWrite.evaluate(({ done }) => done);
         await onlineWrite.dispose();
 
-        await page
-          .frameLocator(".board-widget__frame")
-          .frameLocator("iframe")
-          .getByText("Team metric 1", { exact: true })
-          .waitFor();
+        const dashboard = page
+          .frameLocator("openclaw-board-view mcp-app-view iframe")
+          .frameLocator("iframe");
+        await dashboard.getByText("Team metric 1", { exact: true }).waitFor();
+        expect(await dashboard.getByRole("img", { name: /^Synthetic chart / }).count()).toBe(4);
+        expect(
+          await dashboard.locator("body").evaluate(async () => {
+            await document.fonts.ready;
+            return [...document.fonts].some(
+              (font) => font.family === "TeamMetric" && font.status === "loaded",
+            );
+          }),
+        ).toBe(true);
         await page
           .frameLocator(".chat-tool-card__preview-frame")
           .last()

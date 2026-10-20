@@ -73,7 +73,7 @@ function installWidgetReadiness() {
       return;
     }
     for (const [kind, selector] of [
-      ["board", ".board-widget__frame"],
+      ["board", ".board-widget__frame, openclaw-board-view mcp-app-view iframe"],
       ["inline", ".chat-tool-card__preview-frame"],
     ] as const) {
       const frames = [...document.querySelectorAll<HTMLIFrameElement>(selector)];
@@ -241,6 +241,7 @@ const { values } = parseArgs({
     "fixture-now-ms": { type: "string" },
     "live-start-at-ms": { type: "string" },
     "duplicate-boot-reads": { type: "boolean", default: false },
+    "dashboard-mcp-app": { type: "boolean", default: false },
     "closed-menu-members": { type: "boolean", default: false },
     "capture-ms": { type: "string", default: "0" },
     "sidebar-row-transfer": { type: "string", default: "full" },
@@ -427,7 +428,10 @@ if (!address || typeof address === "string") {
 const fixture = createControlUiTeamScaleFixture({
   now: fixtureNowMs,
   baseUrl: server.baseUrl,
-  sandboxUrl: buildSandboxHostPath({ blockDescendantFrames: true }),
+  sandboxUrl: buildSandboxHostPath({
+    blockDescendantFrames: true,
+    resourceDomains: values["dashboard-mcp-app"] ? [new URL(server.baseUrl).origin] : undefined,
+  }),
   sandboxPort: address.port,
   liveRun: values["live-events"] || values["streaming-reply"],
   sidebarListChurn: values["sidebar-list-churn"],
@@ -436,6 +440,9 @@ const fixture = createControlUiTeamScaleFixture({
   sessionEventDurationMs,
   sessionEventAncestorRefs: values["session-event-ancestor-refs"],
   duplicateBootReads: values["duplicate-boot-reads"],
+  dashboardMcpApp: values["dashboard-mcp-app"]
+    ? { font: await readFile("ui/public/fonts/space-grotesk-latin.woff2") }
+    : undefined,
   closedMenuMembers: values["closed-menu-members"],
   largeSnapshot: values["large-snapshot"],
   transcriptMessages,
@@ -608,7 +615,11 @@ try {
       }
       if (face === "dashboard") {
         await page
-          .frameLocator(".board-widget__frame")
+          .frameLocator(
+            values["dashboard-mcp-app"]
+              ? "openclaw-board-view mcp-app-view iframe"
+              : ".board-widget__frame",
+          )
           .frameLocator("iframe")
           .getByText("Team metric 1", { exact: true })
           .waitFor();
@@ -1326,6 +1337,7 @@ try {
         sidebarListChurn: values["sidebar-list-churn"],
         sidebarLiveChurn: fixture.sidebarLiveChurn,
         duplicateBootReads: values["duplicate-boot-reads"],
+        dashboardMcpApp: values["dashboard-mcp-app"],
         traced: !values.untraced,
         cpuProfile,
         cpuProfileCompare: values["cpu-profile-compare"],
