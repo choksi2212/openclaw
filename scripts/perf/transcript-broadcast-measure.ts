@@ -2395,6 +2395,17 @@ try {
       throw new Error("no retained profile window captured; shorten the round duration");
     }
     if (idleDurationMs > 0) {
+      if (values["worker-snapshots"]) {
+        const snapshots = await readGatewayResources(gateway, {
+          collectGarbage: true,
+          includeWorkers: true,
+          workerSnapshotPathPrefix: path.join(output, "steady"),
+        });
+        writeFileSync(
+          path.join(output, "steady-snapshot-resources.json"),
+          JSON.stringify(snapshots, null, 2),
+        );
+      }
       for (const client of clients) {
         client.close();
       }

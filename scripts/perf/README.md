@@ -881,11 +881,13 @@ The idle phase closes viewers and submits no more RPCs or turns. Natural memory
 samples continue before a final explicit collection of the main and worker
 isolates. Initial and final forced collections are marked in the report; worker
 collection or retirement errors remain visible per isolate. Use
-`--worker-snapshots` to write final worker snapshots sequentially as compressed
-`.heapsnapshot.gz` files, plus `snapshot-resources.json` mapping them to script
-and thread identity. This implies `--worker-memory`; it does not write a main
-heap snapshot. Capture happens after measured traffic and idle sampling, since
-snapshot collection itself pauses the isolate and forces GC. Decompress an
+`--worker-snapshots` to write worker snapshots sequentially as compressed
+`.heapsnapshot.gz` files after steady traffic and after idle, plus
+`steady-snapshot-resources.json` and `snapshot-resources.json` mapping them to
+script and thread identity. This implies `--worker-memory`; it does not write a
+main heap snapshot. Snapshot capture pauses and collects each isolate, so idle
+samples in this mode start from an explicitly collected heap. Omit this flag when
+measuring natural idle GC. Steady traffic timings exclude capture. Decompress an
 individual snapshot for retainer analysis; do not materialize a whole fleet of
 uncompressed snapshots on a production-shared filesystem.
 

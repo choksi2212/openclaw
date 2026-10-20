@@ -605,7 +605,7 @@ async function measure() {
         readerProfileIds.add(self.profile.id);
       }
     }
-    const historyParams = historicalRead ? { sessionId } : {};
+    const historyParams = historicalRead ? { sessionId, messageId: "fixture-message-63-3" } : {};
     const allVariants = [
       {
         name: "history-small",
