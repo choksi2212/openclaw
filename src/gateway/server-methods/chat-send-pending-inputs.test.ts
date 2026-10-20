@@ -48,6 +48,7 @@ import { createMentionInbox } from "../mention-inbox.js";
 import { readMentionInbox, dismissMentionInbox } from "../mention-inbox.test-support.js";
 import { refusePendingInputCommit } from "../pending-input-commit.test-support.js";
 import { handleGatewayRequest } from "../server-methods.js";
+import * as sharingTargetRead from "../session-sharing-target-read.js";
 import { dispatchInboundMessageMock, installGatewayTestHooks } from "../test-helpers.js";
 import { getTestPluginRegistry } from "../test-helpers.plugin-registry.js";
 import { createWorkerSessionPlacementStore } from "../worker-environments/placement-store.js";
@@ -258,9 +259,46 @@ describe("ordinary chat input admission", () => {
     rejected(await fixture.request("users.mentionable", { sessionKey: fixture.scope.sessionKey }));
     rejected(await fixture.send(vi.fn(), {}));
     fixture.client.invalidated = false;
-    setUserProfileRole(fixture.client.authenticatedUserProfile!.profileId, "disabled");
-    rejected(await fixture.request("users.mentionable", { sessionKey: fixture.scope.sessionKey }));
-    rejected(await fixture.send(vi.fn(), {}));
+    const prepareRead = sharingTargetRead.prepareSessionSharingRead;
+    for (const method of ["users.mentionable", "chat.send"] as const) {
+      const ready = createDeferred();
+      const release = createDeferred();
+      const held = vi
+        .spyOn(sharingTargetRead, "prepareSessionSharingRead")
+        .mockImplementationOnce(async (params) => {
+          const prepared = await prepareRead(params);
+          ready.resolve();
+          await release.promise;
+          return prepared;
+        });
+      const inFlight =
+        method === "users.mentionable"
+          ? fixture.request(method, { sessionKey: fixture.scope.sessionKey })
+          : fixture.send(vi.fn(), {});
+      try {
+        await Promise.race([
+          ready.promise,
+          inFlight.then(() => {
+            throw new Error(`${method} completed before the held preparation`);
+          }),
+        ]);
+        setUserProfileRole(fixture.client.authenticatedUserProfile!.profileId, "disabled");
+        release.resolve();
+        expect(await inFlight).toHaveBeenCalledWith(
+          false,
+          undefined,
+          expect.objectContaining({ code: "FORBIDDEN" }),
+        );
+        expect(fixture.readTranscript()).toEqual(fixture.activeTranscript);
+        expect(await pending(fixture)).toEqual({ items: [], total: 0 });
+        expect(await fixture.read()).toEqual([]);
+      } finally {
+        release.resolve();
+        held.mockRestore();
+        await inFlight;
+        setUserProfileRole(fixture.client.authenticatedUserProfile!.profileId, "guest");
+      }
+    }
   });
 
   it("creates recipient-only mentions at original message commit, never at the queued ACK", async () => {
