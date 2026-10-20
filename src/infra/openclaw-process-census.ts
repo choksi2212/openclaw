@@ -219,9 +219,14 @@ function classifyWindowsHandoffAncestry(
   while (child.startIdentity && !visited.has(child.pid)) {
     const childStart = child.startIdentity;
     visited.add(child.pid);
+    // Recorded parentage survives a replacement in the live PID table.
     if (
       drivers.some(
-        ({ pid, startIdentity }) => pid === child.pid && startIdentity === child.startIdentity,
+        ({ pid, startIdentity }) =>
+          (pid === child.pid && startIdentity === childStart) ||
+          (pid === child.parentPid &&
+            /^\d+$/.test(startIdentity) &&
+            BigInt(startIdentity) <= BigInt(childStart)),
       )
     ) {
       return "descendant";
@@ -231,15 +236,6 @@ function classifyWindowsHandoffAncestry(
     // birth proves the current parent PID has been reused.
     if (parent?.startIdentity && BigInt(parent.startIdentity) > BigInt(childStart)) {
       return "unrelated";
-    }
-    const driver = drivers.find(
-      ({ pid, startIdentity }) =>
-        pid === child.parentPid &&
-        /^\d+$/.test(startIdentity) &&
-        BigInt(startIdentity) <= BigInt(childStart),
-    );
-    if (driver) {
-      return !parent || parent.startIdentity === driver.startIdentity ? "descendant" : "unknown";
     }
     if (child.parentPid === 0 || child.parentPid === 4) {
       return "unrelated";

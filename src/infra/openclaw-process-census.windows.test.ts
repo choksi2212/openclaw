@@ -31,7 +31,7 @@ vi.mock("node:fs", async (importOriginal) => {
     readdirSync: () => [],
     readlinkSync: () => "/app",
   };
-  return { ...fs, ...io, default: { ...fs.default, ...io } };
+  return { ...fs, ...io, default: { ...fs, ...io } };
 });
 import { inspectOtherOpenClawProcesses } from "./openclaw-process-census.js";
 
@@ -191,6 +191,13 @@ it.each([
     name: "unreadable descendant",
     sid: "S-1-5-21-100",
     facts: { parentPid: launcher, startIdentity: "300" },
+    matching: true,
+  },
+  {
+    name: "surviving descendant after the recorded driver's PID is reused",
+    sid: "S-1-5-21-100",
+    facts: { parentPid: launcher, startIdentity: "300" },
+    parents: [{ pid: launcher, parentPid: 0, startIdentity: "400" }],
     matching: true,
   },
   {

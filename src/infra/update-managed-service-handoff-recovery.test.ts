@@ -277,3 +277,35 @@ it("settles a prior-boot family with an unreadable recycled owner PID", async ()
   expect(nextStore.read(fixture.root)).toEqual({ kind: "absent" });
   expect(nextUpdate(nextStore)).toBe("acquired");
 });
+
+it.each(["missing-recorded", "unknown-recorded", "unknown-current", "unreadable-current"])(
+  "preserves owner liveness checks with %s boot identity",
+  async (observation) => {
+    const previous = fixture.seed({ ageMs: 1_000 });
+    fixture.births.set(fixture.helper.pid, null);
+    if (observation.endsWith("recorded")) {
+      if (previous.action.kind !== "triage" || previous.action.lifetime.kind !== "foreground") {
+        throw new Error("Expected a foreground repair fixture");
+      }
+      const boot = previous.action.lifetime.boot;
+      if (observation === "missing-recorded") {
+        Reflect.deleteProperty(boot, "identity");
+      } else {
+        boot.identity = "unknown";
+      }
+      vi.spyOn(fixture.store, "read").mockReturnValue({ kind: "current", lease: previous });
+    } else {
+      const boot = fixture.store.bootIdentity();
+      vi.spyOn(fixture.store, "bootIdentity").mockImplementation(() => {
+        if (observation === "unreadable-current") {
+          throw new Error("OS boot identity unavailable");
+        }
+        return { ...boot, identity: "unknown" };
+      });
+    }
+    await expect(prepareRepair()).rejects.toThrow(
+      `Handoff owners are live or unverified: PID ${fixture.helper.pid}`,
+    );
+    expect(fixture.repairFacts).not.toHaveBeenCalled();
+  },
+);

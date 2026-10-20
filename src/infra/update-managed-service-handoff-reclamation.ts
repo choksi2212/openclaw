@@ -35,6 +35,7 @@ import {
 } from "./update-managed-service-handoff-rows.js";
 import type { createManagedHandoffLeaseRows } from "./update-managed-service-handoff-rows.js";
 import {
+  managedHandoffBootSchema,
   parseManagedHandoffLeasePayload,
   type ManagedHandoffLeaseAction,
 } from "./update-managed-service-handoff-schema.js";
@@ -241,11 +242,18 @@ export async function prepareManagedHandoffRepair(
   ) {
     return null;
   }
-  const boot = store.bootIdentity();
+  let boot: ReturnType<typeof store.bootIdentity> | undefined;
+  try {
+    boot = managedHandoffBootSchema.parse(store.bootIdentity());
+  } catch {
+    // Missing boot evidence must not bypass the normal liveness checks.
+  }
   const familyExited = (lease: ManagedHandoffLease) => {
     const lifetime = lease.action.kind === "triage" ? lease.action.lifetime : undefined;
     return (
+      boot !== undefined &&
       lifetime?.kind === "foreground" &&
+      managedHandoffBootSchema.safeParse(lifetime.boot).success &&
       boot.platform === lifetime.boot.platform &&
       boot.identity !== lifetime.boot.identity
     );
@@ -307,7 +315,10 @@ export async function prepareManagedHandoffRepair(
   const action: ManagedHandoffLeaseAction = {
     kind: "triage",
     phase: "running",
-    lifetime: { kind: "foreground", boot },
+    lifetime: {
+      kind: "foreground",
+      boot: boot ?? managedHandoffBootSchema.parse(store.bootIdentity()),
+    },
   };
   let next = rows.handle(root, {
     owner: randomUUID(),
