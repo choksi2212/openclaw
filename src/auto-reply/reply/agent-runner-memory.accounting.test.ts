@@ -10,6 +10,7 @@ import {
   registerMemoryCapability,
 } from "../../plugins/memory-state.test-fixtures.js";
 import { runMemoryFlushIfNeeded, runSessionCompactionIfNeeded } from "./agent-runner-memory.js";
+import { createModifiedMemoryFlushPlan } from "./agent-runner-memory.test-support.js";
 import { createTestFollowupRun, withTestModelContextTokens } from "./agent-runner.test-fixtures.js";
 
 const { accounting, compact, flush, runEntry, increment } = vi.hoisted(() => ({
@@ -34,14 +35,7 @@ vi.mock("./session-updates.js", () => ({ incrementCompactionCount: increment }))
 beforeEach(() => {
   vi.clearAllMocks();
   registerMemoryCapability("memory-core", {
-    flushPlanResolver: () => ({
-      softThresholdTokens: 4000,
-      forceFlushTranscriptBytes: 1000,
-      reserveTokensFloor: 20000,
-      prompt: "Save memory",
-      systemPrompt: "Save memory",
-      relativePath: "memory/synthetic.md",
-    }),
+    flushPlanResolver: () => createModifiedMemoryFlushPlan({ forceFlushTranscriptBytes: 1000 }),
   });
 });
 afterEach(() => clearMemoryPluginState());
@@ -64,31 +58,24 @@ function runAccounting(kind: "memory" | "compaction", assertCurrent?: () => void
       totalTokens: 10000,
       totalTokensFresh: false,
       totalTokensVersion: SESSION_TOTAL_TOKENS_VERSION,
-      ...(kind === "compaction"
-        ? {
-            transcriptByteCompactionLatch: {
-              sessionId: "session",
-              activeBytes: 3000,
-              maxBytes: 1000,
-            },
-          }
-        : {}),
+      transcriptByteCompactionLatch:
+        kind === "compaction"
+          ? { sessionId: "session", activeBytes: 3000, maxBytes: 1000 }
+          : undefined,
     },
     sessionKey: "main",
     storePath: path.join(followupRun.run.workspaceDir, "sessions.json"),
     isHeartbeat: false,
-    cfg: withTestModelContextTokens({
-      cfg: {
-        agents: { defaults: { compaction: { maxActiveTranscriptBytes: 1000, memoryFlush: {} } } },
-      },
-      followupRun,
-      defaultModel: "anthropic/claude-opus-4-6",
-      contextTokens: 100000,
-    }),
+    cfg: {
+      agents: { defaults: { compaction: { maxActiveTranscriptBytes: 1000, memoryFlush: {} } } },
+    },
   };
-  return kind === "memory"
-    ? runMemoryFlushIfNeeded({ ...params, resolvedVerboseLevel: "off" })
-    : runSessionCompactionIfNeeded(params);
+  const execute = kind === "memory" ? runMemoryFlushIfNeeded : runSessionCompactionIfNeeded;
+  return execute({
+    ...params,
+    cfg: withTestModelContextTokens({ ...params, contextTokens: 100000 }),
+    resolvedVerboseLevel: "off",
+  });
 }
 
 it.each(["memory", "compaction"] as const)(
@@ -103,7 +90,6 @@ it.each(["memory", "compaction"] as const)(
       await release.promise;
       return {
         byteSize: 2000,
-        eventCount: 1,
         turnTainted: false,
         usage: { promptTokens: 90000, outputTokens: 7, trailingMessages: [] },
       };

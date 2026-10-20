@@ -14,6 +14,7 @@ import * as registryState from "../../sessions/session-controller.state.js";
 import { createCommandTurnContext } from "../command-turn-context.js";
 import { bindReplyFallbackSteeringRoute } from "./agent-runner-fallback-authority.js";
 import { runReplyAgent } from "./agent-runner-run.js";
+import { createReplyParams } from "./agent-runner-steer-adoption.test-support.js";
 import * as followupRunner from "./followup-runner.js";
 import { createPersonalToolScreenDispatcher } from "./personal-tool-turn.test-support.js";
 import { getFollowupQueueDepth, type FollowupRun } from "./queue.js";
@@ -34,26 +35,19 @@ afterEach(() => vi.restoreAllMocks());
 type ReplyParams = Parameters<typeof runReplyAgent>[0];
 
 function steer(run: FollowupRun, key: string, overrides: Partial<ReplyParams>) {
-  return runReplyAgent({
-    commandBody: run.prompt,
-    followupRun: run,
-    queueKey: key,
-    resolvedQueue: { mode: "steer", debounceMs: 0 },
-    shouldSteer: true,
-    shouldFollowup: false,
-    isActive: true,
-    typing: createMockTypingController(),
-    sessionCtx: {},
-    sessionKey: key,
-    defaultModel: "gpt-test",
-    resolvedVerboseLevel: "off",
-    isNewSession: false,
-    blockStreamingEnabled: false,
-    resolvedBlockStreamingBreak: "text_end",
-    shouldInjectGroupIntro: false,
-    typingMode: "never",
-    ...overrides,
-  });
+  return runReplyAgent(
+    createReplyParams(run, {
+      transcriptCommandBody: undefined,
+      queueKey: key,
+      resolvedQueue: { mode: "steer", debounceMs: 0 },
+      shouldSteer: true,
+      isActive: true,
+      sessionKey: key,
+      defaultModel: "gpt-test",
+      resolvedBlockStreamingBreak: "text_end",
+      ...overrides,
+    }),
+  );
 }
 
 function operator(run: FollowupRun, profileId: string, assertCurrent = () => {}) {
@@ -134,12 +128,13 @@ describe("ordinary steering into automatic model fallback", () => {
           resetTriggered: false,
         });
         expect(admission.status).toBe("owned");
-        if (admission.status === "owned") {
-          try {
-            await consumeFollowup(queued);
-          } finally {
-            admission.operation.complete();
-          }
+        if (admission.status !== "owned") {
+          return;
+        }
+        try {
+          await consumeFollowup(queued);
+        } finally {
+          admission.operation.complete();
         }
       });
       const fingerprint = toolAuthority.prepareFollowupRunToolAuthorityFingerprint;
@@ -245,18 +240,24 @@ describe("ordinary steering into automatic model fallback", () => {
     run.run.agentId = "main";
     run.run.sessionKey = key;
     run.run.sessionId = `fallback-${scenario}`;
+    const modelConfig = {
+      primary: "openai/gpt-test",
+      fallbacks: scenario === "policy-fallback" ? undefined : ["test-alias/test-model"],
+    };
     run.run.config = {
-      ...(scenario === "cross-profile-default"
-        ? {}
-        : { messages: { queue: { allowCollaborativeSteering: collaborative || explicitSteer } } }),
-      agents: {
-        defaults: {
-          model: {
-            primary: "openai/gpt-test",
-            ...(scenario === "policy-fallback" ? {} : { fallbacks: ["test-alias/test-model"] }),
-          },
-        },
-      },
+      messages:
+        scenario === "cross-profile-default"
+          ? undefined
+          : {
+              queue: { allowCollaborativeSteering: collaborative || explicitSteer },
+            },
+      agents: { defaults: { model: modelConfig } },
+    };
+    const alias = {
+      provider: "test-provider",
+      ...(scenario === "transport-alias"
+        ? { api: "openai-completions" as const, baseUrl: "https://example.invalid/v1" }
+        : {}),
     };
     const plugins = createPluginMetadataSnapshotFixture({
       plugins: [
@@ -264,16 +265,7 @@ describe("ordinary steering into automatic model fallback", () => {
           id: "test-provider",
           enabledByDefault: true,
           providers: ["test-provider"],
-          modelCatalog: {
-            aliases: {
-              "test-alias": {
-                provider: "test-provider",
-                ...(scenario === "transport-alias"
-                  ? { api: "openai-completions" as const, baseUrl: "https://example.invalid/v1" }
-                  : {}),
-              },
-            },
-          },
+          modelCatalog: { aliases: { "test-alias": alias } },
         },
       ],
     });
@@ -356,19 +348,14 @@ describe("ordinary steering into automatic model fallback", () => {
             messageInjectionV2: {
               version: 2,
               isAvailable: () => true,
-              ...(scenario === "cross-profile-pending"
-                ? {
-                    claimPendingUserInputAnswer: async (
-                      text: string,
-                      _options: unknown,
-                      assertCurrent: () => void,
-                    ) => {
+              claimPendingUserInputAnswer:
+                scenario === "cross-profile-pending"
+                  ? async (text: string, _options: unknown, assertCurrent: () => void) => {
                       assertCurrent();
                       delivered.push(text);
                       return true;
-                    },
-                  }
-                : {}),
+                    }
+                  : undefined,
               queueMessage: async (text, _options, assertCurrent) => {
                 if (scenario === "cross-profile-pending") {
                   throw new Error(
@@ -440,15 +427,13 @@ describe("ordinary steering into automatic model fallback", () => {
                 GatewayClientCaps: run.run.clientCaps,
                 GatewayUiCommandTarget: run.run.gatewayUiCommandTarget,
                 // The command handler rewrites the prompt but retains the explicit turn facts.
-                ...(explicitSteer
-                  ? {
-                      CommandTurn: createCommandTurnContext("text", {
-                        authorized: true,
-                        commandName: "steer",
-                        body: `/steer ${run.prompt}`,
-                      }),
-                    }
-                  : {}),
+                CommandTurn: explicitSteer
+                  ? createCommandTurnContext("text", {
+                      authorized: true,
+                      commandName: "steer",
+                      body: `/steer ${run.prompt}`,
+                    })
+                  : undefined,
               }
             : {},
       });

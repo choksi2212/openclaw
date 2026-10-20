@@ -13,16 +13,11 @@ import { createTypingSignaler } from "./typing-mode.js";
 it("emits usage diagnostics for a deliberate silent reply", async () => {
   const sessionKey = "agent:main:silent-usage";
   const sessionId = "silent-usage-session";
-  const cfg = {};
   const followupRun = createMockFollowupRun({
     prompt: "check quietly",
     run: {
-      agentId: "main",
-      agentDir: "agent",
-      workspaceDir: "workspace",
       sessionKey,
       sessionId,
-      config: cfg,
       provider: "openai",
       model: "gpt-5.6-luna",
     },
@@ -42,14 +37,12 @@ it("emits usage diagnostics for a deliberate silent reply", async () => {
   const diagnostics: DiagnosticEventPayload[] = [];
   const unsubscribe = onInternalDiagnosticEvent((event) => diagnostics.push(event));
   const context = createTestFinalizationContext(followupRun, replyOperation);
-  Object.assign(context, {
+  context.isHeartbeat = true;
+  context.runId = "silent-usage-run";
+  context.typingSignals = createTypingSignaler({
+    typing: createMockTypingController(),
+    mode: "never",
     isHeartbeat: true,
-    runId: "silent-usage-run",
-    typingSignals: createTypingSignaler({
-      typing: createMockTypingController(),
-      mode: "never",
-      isHeartbeat: true,
-    }),
   });
   context.execution.result = {
     payloads: [],
@@ -58,8 +51,7 @@ it("emits usage diagnostics for a deliberate silent reply", async () => {
       terminalReply: { disposition: "silent" },
       agentMeta: {
         sessionId,
-        provider: "openai",
-        model: "gpt-5.6-luna",
+        ...context.execution.resolved,
         usage: { input: 1_200, output: 25, total: 1_225 },
       },
     },

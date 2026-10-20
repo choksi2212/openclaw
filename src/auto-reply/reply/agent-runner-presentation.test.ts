@@ -106,16 +106,14 @@ describe("agent runner streaming presentation", () => {
         texts.push(payload.text);
       },
     });
-    await presentation.presentPartialReply({ text: "HEARTBEAT_", delta: "HEARTBEAT_" }, "embedded");
-    await presentation.presentPartialReply({ text: "HEARTBEAT_OK", delta: "OK" }, "embedded");
-    await presentation.presentPartialReply(
+    for (const payload of [
+      { text: "HEARTBEAT_", delta: "HEARTBEAT_" },
+      { text: "HEARTBEAT_OK", delta: "OK" },
       { text: "HEARTBEAT_OK details", delta: " details" },
-      "embedded",
-    );
-    await presentation.presentPartialReply(
       { text: "replacement", delta: "", replace: true },
-      "embedded",
-    );
+    ]) {
+      await presentation.presentPartialReply(payload, "embedded");
+    }
     expect(texts).toEqual(["HEARTBEAT_", "details", "replacement"]);
   });
 
@@ -255,14 +253,19 @@ describe("agent runner streaming presentation", () => {
       .map((line, index) => `${index === 0 ? prefix : continuation}${line}`)
       .join("\n");
   const repeatedContext = `${marker}\nprivate first paragraph\n${marker}\nprivate final paragraph`;
-
-  const promptCases: Array<{
-    name: string;
-    context: string;
-    copied: string;
-    answer?: string;
-    skippedLengths?: number[];
-  }> = [
+  const streamedAnswer = "Visible streamed answer.";
+  const xmlContext = historyContext.replace(
+    "private inbound paragraph",
+    '<function_calls><invoke name="exec">private XML</invoke></function_calls>\nprivate inbound paragraph',
+  );
+  type PromptCase = [
+    name: string,
+    copied: string,
+    context?: string,
+    answer?: string,
+    skippedLengths?: number[],
+  ];
+  const promptCases: PromptCase[] = [
     ...(
       [
         ["standard", "> "],
@@ -285,12 +288,12 @@ describe("agent runner streaming presentation", () => {
         ["very wide list", "- ", " ".repeat(320)],
         ["deep quote", "> ", `${">".repeat(320)} `],
       ] satisfies Array<[string, string, string?]>
-    ).map(([name, prefix, continuation]) => ({
+    ).map(([name, prefix, continuation]): PromptCase => [
       name,
-      context: historyContext,
-      copied: wrap(historyContext, prefix, continuation),
-      answer: "Visible streamed answer.",
-    })),
+      wrap(historyContext, prefix, continuation),
+      historyContext,
+      streamedAnswer,
+    ]),
     ...(
       [
         ["bulleted", "- ", "- ", "- "],
@@ -300,50 +303,30 @@ describe("agent runner streaming presentation", () => {
         ["prompt-owned bullet", "- ", "    ", "- "],
         ["prompt-owned quote", "> ", ">> ", "> "],
       ] satisfies Array<[string, string, string, string]>
-    ).map(([name, prefix, continuation, sourcePrefix]) => {
+    ).map(([name, prefix, continuation, sourcePrefix]): PromptCase => {
       const context = `${marker}\n${sourcePrefix}private inbound paragraph`;
-      return { name, context, copied: wrap(context, prefix, continuation) };
+      return [name, wrap(context, prefix, continuation), context];
     }),
-    {
-      name: "same-line answer",
-      context: currentContext,
-      copied: wrap(currentContext, "Visible answer: ", "> "),
-    },
-    {
-      name: "carriage returns",
-      context: currentContext,
-      copied: currentContext.replace(/\n/g, "\r"),
-      answer: "Visible answer.",
-    },
-    {
-      name: "repeated source marker",
-      context: repeatedContext,
-      copied: wrap(repeatedContext, "- ", " ".repeat(320)),
-    },
-    {
-      name: "unwrapped history",
-      context: historyContext,
-      copied: historyContext,
-      answer: "Visible streamed answer.",
-      skippedLengths: [1, 9, 50, 74, historyContext.length - 1],
-    },
-    ...["private", "private inbound"].map((privatePrefix) => ({
-      name: `marker flood: ${privatePrefix}`,
-      context: currentContext,
-      copied: `${marker}\n`.repeat(32) + privatePrefix,
-    })),
-    ...['<function_calls><invoke name="exec">private XML</invoke></function_calls>'].map((xml) => {
-      const context = historyContext.replace(
-        "private inbound paragraph",
-        `${xml}\nprivate inbound paragraph`,
-      );
-      return { name: "XML cleanup", context, copied: context, answer: "Visible streamed answer." };
-    }),
+    ["same-line answer", wrap(currentContext, "Visible answer: ", "> ")],
+    ["carriage returns", currentContext.replace(/\n/g, "\r"), currentContext, "Visible answer."],
+    ["repeated source marker", wrap(repeatedContext, "- ", " ".repeat(320)), repeatedContext],
+    [
+      "unwrapped history",
+      historyContext,
+      historyContext,
+      streamedAnswer,
+      [1, 9, 50, 74, historyContext.length - 1],
+    ],
+    ...["private", "private inbound"].map((prefix): PromptCase => [
+      `marker flood: ${prefix}`,
+      `${marker}\n`.repeat(32) + prefix,
+    ]),
+    ["XML cleanup", xmlContext, xmlContext, streamedAnswer],
   ];
   it.each(promptCases)(
-    "withholds private prompt bytes: $name",
-    ({ context, copied, answer, skippedLengths }) => {
-      const presentation = createPresentation({ conversationContext: context });
+    "withholds private prompt bytes: %s",
+    (_name, copied, context, answer, skippedLengths) => {
+      const presentation = createPresentation({ conversationContext: context ?? currentContext });
       for (let length = 1; length <= copied.length; length += 1) {
         const visibleText =
           presentation.normalizeStreamingText({ text: copied.slice(0, length) }).text ?? "";

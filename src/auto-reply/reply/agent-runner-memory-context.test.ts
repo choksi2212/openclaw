@@ -15,25 +15,21 @@ const catalogModel = {
   contextTokens: 872_000,
   contextWindows: [window],
 };
+type BudgetParams = Parameters<typeof resolveFollowupContextTokens>[0];
 function resolveBudget(
-  thinkingCatalog: NonNullable<Parameters<typeof createTestFollowupRun>[0]>["thinkingCatalog"],
-  options: Omit<
-    Parameters<typeof resolveFollowupContextTokens>[0],
-    "followupRun" | "defaultModel"
-  > = {
-    cfg: {},
-  },
+  thinkingCatalog: BudgetParams["followupRun"]["run"]["thinkingCatalog"],
+  sessionEntry?: BudgetParams["sessionEntry"],
   cap?: number,
 ) {
   const followupRun = createTestFollowupRun({ provider, model, thinkingCatalog });
   const cfg = withTestModelContextTokens({
-    cfg: options.cfg,
+    cfg: {},
     followupRun,
     defaultModel: model,
     contextTokens: cap,
   });
   return resolveFollowupContextTokens(
-    { followupRun, defaultModel: model, ...options, cfg },
+    { followupRun, defaultModel: model, sessionEntry, cfg },
     "openclaw",
   );
 }
@@ -46,14 +42,7 @@ it.each([
   expect(
     resolveBudget(
       [{ ...catalogModel, contextWindow: 128_000, contextWindowSource: "synthetic" }],
-      {
-        cfg: {},
-        sessionEntry: {
-          sessionId: "session",
-          updatedAt: 0,
-          contextWindow: selected,
-        },
-      },
+      { sessionId: "session", updatedAt: 0, contextWindow: selected },
       cap,
     ),
   ).toBe(expected);
@@ -96,8 +85,9 @@ it("keeps the admitted synthetic estimate when prompt capacity is unknown", () =
 it("ignores a selected window from a different session", () => {
   expect(
     resolveBudget([catalogModel], {
-      cfg: {},
-      sessionEntry: { sessionId: "foreign-session", updatedAt: 0, contextWindow: "small" },
+      sessionId: "foreign-session",
+      updatedAt: 0,
+      contextWindow: "small",
     }),
   ).toBe(872_000);
 });

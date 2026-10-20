@@ -74,6 +74,42 @@ function createFixture() {
 }
 
 type Fixture = Awaited<ReturnType<typeof createFixture>>;
+function createRecoveryFixture(
+  { context, sessionId }: Fixture,
+  admissionRunId: string,
+  state: Pick<
+    Parameters<typeof createReplyRestartRecoveryClaimController>[0],
+    "getEntry" | "setEntry"
+  > = {
+    getEntry: () => context.activeSessionEntry,
+    setEntry(next) {
+      context.activeSessionEntry = next;
+      context.activeSessionStore![context.sessionKey!] = next;
+    },
+  },
+) {
+  const scope = { agentId: "main", storePath, sessionKey: context.sessionKey! };
+  const getSessionId = () => sessionId;
+  const actor = createReplyRecoveryActorFixture({
+    ...scope,
+    getSessionId,
+    operation: context.replyOperation,
+  });
+  return Object.assign(actor, {
+    controller: createReplyRestartRecoveryClaimController({
+      ...scope,
+      ...state,
+      acquireSessionActor: () => actor.acquireSessionActor(),
+      admissionRunId,
+      executionRunId: context.runId,
+      lifecycleGeneration: getAgentEventLifecycleGeneration(),
+      getSessionId,
+      isRestartAbort: () => false,
+      resolveDeliveryContext: () => undefined,
+    }),
+  });
+}
+
 function setTerminalReply(
   { context }: Fixture,
   kind: "NO_REPLY" | "empty" | "hook_block",
@@ -96,11 +132,12 @@ it.each(["before-accounting", "during-payload-preparation"] as const)(
   "consolidates only the model switch present %s",
   async (when) => {
     const fixture = await createFixture();
-    fixture.context.execution.result.payloads = [
+    const { context } = fixture;
+    context.execution.result.payloads = [
       { text: "done", mediaUrl: "https://example.invalid/final.png" },
     ];
     let payloadPrepared = false;
-    fixture.context.replyMediaContext.normalizePayload = async (payload) => {
+    context.replyMediaContext.normalizePayload = async (payload) => {
       payloadPrepared = true;
       if (when === "during-payload-preparation") {
         await fixture.replace({ ...fixture.read()!, liveModelSwitchPending: true });
@@ -109,11 +146,11 @@ it.each(["before-accounting", "during-payload-preparation"] as const)(
     };
     if (when === "before-accounting") {
       await fixture.replace({
-        ...fixture.context.activeSessionEntry!,
+        ...context.activeSessionEntry!,
         liveModelSwitchPending: true,
       });
     }
-    await finalizeReplyAgentRun(fixture.context);
+    await finalizeReplyAgentRun(context);
     expect(payloadPrepared).toBe(true);
     expect(fixture.read()?.liveModelSwitchPending).toBe(
       when === "during-payload-preparation" ? true : undefined,
@@ -123,9 +160,7 @@ it.each(["before-accounting", "during-payload-preparation"] as const)(
 
 it("retains an accepted rejected followup's recovery claim until source delivery settles", async () => {
   const fixture = await createFixture();
-  const { context, sessionId, turn } = fixture;
-  const sessionKey = context.sessionKey!;
-  const scope = { agentId: "main", storePath, sessionKey };
+  const { context, turn } = fixture;
   const entry = {
     ...fixture.read()!,
     restartRecoveryDeliveryRunId: "accepted-followup",
@@ -133,23 +168,11 @@ it("retains an accepted rejected followup's recovery claim until source delivery
   };
   await fixture.replace(entry);
   turn.session.publish(entry);
-  await using actor = createReplyRecoveryActorFixture({
-    ...scope,
-    getSessionId: () => sessionId,
-    operation: turn.operation,
-  });
-  const recovery = createReplyRestartRecoveryClaimController({
-    ...scope,
-    acquireSessionActor: () => actor.acquireSessionActor(),
-    admissionRunId: "accepted-followup",
-    executionRunId: turn.runId,
-    lifecycleGeneration: getAgentEventLifecycleGeneration(),
+  await using actor = createRecoveryFixture(fixture, "accepted-followup", {
     getEntry: turn.session.current,
-    getSessionId: () => sessionId,
-    isRestartAbort: () => false,
-    resolveDeliveryContext: () => undefined,
     setEntry: (next) => turn.session.publish(next),
   });
+  const recovery = actor.controller;
   await recovery.admitUserTurn();
   turn.restartRecovery = recovery;
   let deliveryEntry: SessionEntry | undefined;
@@ -213,17 +236,18 @@ it.each([
   "preserves a newer $name switch selected during payload preparation",
   async ({ authProfileOverride, authProfileOverrideSource }) => {
     const fixture = await createFixture();
-    fixture.context.execution.result.payloads = [
+    const { context } = fixture;
+    context.execution.result.payloads = [
       { text: "done", mediaUrl: "https://example.invalid/final.png" },
     ];
     await fixture.replace({
-      ...fixture.context.activeSessionEntry!,
+      ...context.activeSessionEntry!,
       authProfileOverride: "openai:old",
       authProfileOverrideSource: "auto",
       liveModelSwitchPending: true,
     });
     let payloadPrepared = false;
-    fixture.context.replyMediaContext.normalizePayload = async (payload) => {
+    context.replyMediaContext.normalizePayload = async (payload) => {
       payloadPrepared = true;
       await fixture.replace({
         ...fixture.read()!,
@@ -234,7 +258,7 @@ it.each([
       return payload;
     };
 
-    await finalizeReplyAgentRun(fixture.context);
+    await finalizeReplyAgentRun(context);
 
     expect(payloadPrepared).toBe(true);
     expect(fixture.read()).toMatchObject({
@@ -331,26 +355,8 @@ it.each(["success", "publication-failure", "rollback"] as const)(
     await sessionAccessor.replaceSessionEntry(scope, entry);
     context.activeSessionEntry = entry;
     context.activeSessionStore![sessionKey] = entry;
-    await using actor = createReplyRecoveryActorFixture({
-      ...scope,
-      getSessionId: () => sessionId,
-      operation: context.replyOperation,
-    });
-    const controller = createReplyRestartRecoveryClaimController({
-      ...scope,
-      acquireSessionActor: () => actor.acquireSessionActor(),
-      admissionRunId: "recovery-run",
-      executionRunId: context.runId,
-      lifecycleGeneration: getAgentEventLifecycleGeneration(),
-      getEntry: () => context.activeSessionEntry,
-      getSessionId: () => sessionId,
-      isRestartAbort: () => false,
-      resolveDeliveryContext: () => undefined,
-      setEntry(next) {
-        context.activeSessionEntry = next;
-        context.activeSessionStore![sessionKey] = next;
-      },
-    });
+    await using actor = createRecoveryFixture(fixture, "recovery-run");
+    const controller = actor.controller;
     await controller.admitUserTurn();
     const settled = {
       ...fixture.read()!,
@@ -381,6 +387,15 @@ it.each(["success", "publication-failure", "rollback"] as const)(
           }
         : {},
     );
+    const expected = {
+      status: "done",
+      endedAt: 1_000,
+      updatedAt: 1_000,
+      inputTokens: 120,
+      outputTokens: 8,
+      pendingFinalDelivery: { text: "done", deliveries: [{ state: "prepared" }] },
+      restartRecoveryTerminalRunIds: ["source-turn"],
+    };
     try {
       if (outcome === "success") {
         await finalizeReplyAgentRun(context);
@@ -394,15 +409,7 @@ it.each(["success", "publication-failure", "rollback"] as const)(
       if (outcome === "rollback") {
         expect(fixture.read()).toEqual(before);
       } else {
-        expect(fixture.read()).toMatchObject({
-          status: "done",
-          endedAt: 1_000,
-          updatedAt: 1_000,
-          inputTokens: 120,
-          outputTokens: 8,
-          pendingFinalDelivery: { text: "done", deliveries: [{ state: "prepared" }] },
-          restartRecoveryTerminalRunIds: ["source-turn"],
-        });
+        expect(fixture.read()).toMatchObject(expected);
         expect(fixture.read()?.restartRecoveryDeliveryRunId).toBeUndefined();
       }
       const commandsBeforeCleanup = observer.commands.length;
@@ -416,15 +423,7 @@ it.each(["success", "publication-failure", "rollback"] as const)(
         await actor.release();
         await disposeOpenClawAgentDatabaseByPath(storePath);
         openOpenClawAgentDatabase({ agentId: "main", path: storePath });
-        expect(fixture.read()).toMatchObject({
-          status: "done",
-          endedAt: 1_000,
-          updatedAt: 1_000,
-          inputTokens: 120,
-          outputTokens: 8,
-          restartRecoveryTerminalRunIds: ["source-turn"],
-          pendingFinalDelivery: { text: "done" },
-        });
+        expect(fixture.read()).toMatchObject(expected);
         expect(fixture.read()?.restartRecoveryDeliveryRunId).toBeUndefined();
       }
     } finally {
@@ -434,29 +433,30 @@ it.each(["success", "publication-failure", "rollback"] as const)(
 );
 
 it.each([
-  { name: "typed runtime", tokens: 1_000_000, source: "runtime" as const, expected: 1_000_000 },
-  { name: "source-less runtime", tokens: 512_000, source: undefined, expected: 512_000 },
-  { name: "current model lookup", tokens: undefined, source: undefined, expected: 1_000 },
-  { name: "prior context fallback", tokens: undefined, source: undefined, expected: 272_000 },
-])(
-  "persists $name context provenance through completion",
-  async ({ name, tokens, source, expected }) => {
+  ["typed runtime", 1_000_000, "runtime", 1_000_000, "runtime"],
+  ["source-less runtime", 512_000, undefined, 512_000, "runtime"],
+  ["current model lookup", undefined, undefined, 1_000, "resolved-v1"],
+  ["prior context fallback", undefined, undefined, 272_000, undefined],
+] as const)(
+  "persists %s context provenance through completion",
+  async (name, tokens, source, expected, expectedSource) => {
     const fixture = await createFixture();
+    const { context, turn } = fixture;
     if (name === "prior context fallback") {
       const previous = {
-        ...fixture.context.activeSessionEntry!,
+        ...context.activeSessionEntry!,
         model: "old-model",
         contextTokens: 272_000,
         contextTokensSource: "resolved" as const,
       };
       await fixture.replace(previous);
-      fixture.context.activeSessionEntry = previous;
-      fixture.turn.session.publish(previous);
-      fixture.context.followupRun.run.model = "unlisted-model";
-      fixture.context.execution.resolved.model = "unlisted-model";
+      context.activeSessionEntry = previous;
+      turn.session.publish(previous);
+      context.followupRun.run.model = "unlisted-model";
+      context.execution.resolved.model = "unlisted-model";
     }
     await fixture.account("followup", {
-      model: fixture.context.execution.resolved.model,
+      model: context.execution.resolved.model,
       agentHarnessId: "context-fixture",
       contextTokens: tokens,
       contextTokensSource: source,
@@ -465,13 +465,7 @@ it.each([
       contextTokens: expected,
       agentHarnessId: "context-fixture",
     });
-    expect(fixture.read()?.contextTokensSource).toBe(
-      name === "current model lookup"
-        ? "resolved-v1"
-        : name === "prior context fallback"
-          ? undefined
-          : "runtime",
-    );
+    expect(fixture.read()?.contextTokensSource).toBe(expectedSource);
   },
 );
 
@@ -483,7 +477,8 @@ it.each([
   "keeps $lane diagnostic refresh inside its captured $field",
   async ({ lane, field }) => {
     const fixture = await createFixture();
-    const original = fixture.context.activeSessionEntry!;
+    const { context, turn } = fixture;
+    const original = context.activeSessionEntry!;
     const replacement = {
       ...original,
       [field]: field === "sessionId" ? `${fixture.sessionId}-replacement` : "replacement",
@@ -491,24 +486,21 @@ it.each([
       traceLevel: "on" as const,
       pluginDebugEntries: [{ pluginId: "replacement", lines: ["🔎 REPLACEMENT_DIAGNOSTIC"] }],
     };
-    fixture.context.followupRun.run.traceAuthorized = true;
-    fixture.context.followupRun.run.traceLevelOverride = "on";
-    fixture.context.activeSessionStore = fixture.turn.sessionStore;
+    Object.assign(context.followupRun.run, { traceAuthorized: true, traceLevelOverride: "on" });
+    context.activeSessionStore = turn.sessionStore;
     const reader = vi
       .spyOn(sessionAccessor, "loadSessionEntryReadOnly")
       .mockReturnValue(replacement);
     try {
       const result =
-        lane === "ordinary"
-          ? await finalizeReplyAgentRun(fixture.context)
-          : await fixture.deliverQueued();
+        lane === "ordinary" ? await finalizeReplyAgentRun(context) : await fixture.deliverQueued();
       const text = (Array.isArray(result) ? result : [result])
         .map((payload) => payload?.text)
         .join("\n");
       expect(text).not.toContain("REPLACEMENT_DIAGNOSTIC");
     } finally {
       reader.mockRestore();
-      expect(fixture.turn.session.current()).toMatchObject({
+      expect(turn.session.current()).toMatchObject({
         sessionId: original.sessionId,
         lifecycleRevision: original.lifecycleRevision,
       });
@@ -716,17 +708,14 @@ describe("cancelled followup compaction accounting", () => {
 });
 describe("followup context-pressure accounting", () => {
   const lane = "followup";
-  it.each([
-    { runtimeOwned: true, finalizer: true },
-    { runtimeOwned: false, finalizer: false },
-  ])(
-    "records runtime-selected models without inventing host fallback (owned: $runtimeOwned, finalizer: $finalizer)",
-    async ({ runtimeOwned, finalizer }) => {
+  it.each([true, false])(
+    "records runtime-selected models without inventing host fallback (owned: %s)",
+    async (runtimeOwned) => {
       const fixture = await createFixture();
       const outer = { provider: "outer-provider", model: "outer-model" };
       const selection = {
         provider: diagnostic.provider,
-        model: finalizer ? "native-selected-model" : diagnostic.model,
+        model: runtimeOwned ? "native-selected-model" : diagnostic.model,
       };
       const models = fixture.context.cfg.models!.providers!.openai!.models;
       models.push({
