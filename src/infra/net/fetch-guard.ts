@@ -6,6 +6,7 @@ import { logWarn } from "../../logger.js";
 import { captureEffectAuthority } from "../../shared/effect-authority.js";
 import { buildTimeoutAbortSignal } from "../../utils/fetch-timeout.js";
 import { normalizeRequestInitHeadersForFetch } from "../fetch-headers.js";
+import { isWrapperOfAmbientGlobalFetch } from "../fetch.js";
 import { cancelUnreadResponseBody } from "../http-body.js";
 import {
   resolveConfiguredLocalOriginLinkLocalHopPolicy,
@@ -412,10 +413,18 @@ async function fetchWithSsrFGuardInternal(
     throw new Error("fetch is not available");
   }
   const isUsingMockedFetch = isMockedFetch(defaultFetch);
+  // Wrappers forwarding to the ambient global fetch cannot accept this
+  // guard's bundled undici dispatcher: Node's built-in fetch rejects a foreign
+  // dispatcher object whenever the two undici generations disagree
+  // ("invalid onRequestStart method" on Node 24). Treat marked wrappers as
+  // non-dispatcher-capable so dispatcher-attached hops route through the
+  // bundled undici runtime fetch instead of failing inside the wrapper.
+  const wrapsAmbientGlobalFetch = isWrapperOfAmbientGlobalFetch(params.fetchImpl);
   const supportsDispatcherInit =
-    (params.fetchImpl !== undefined &&
+    !wrapsAmbientGlobalFetch &&
+    ((params.fetchImpl !== undefined &&
       !isAmbientGlobalFetch({ fetchImpl: params.fetchImpl, globalFetch })) ||
-    isUsingMockedFetch;
+      isUsingMockedFetch);
   // Admission precedes DNS and transport awaits. Capture must not resolve a new
   // session after a delayed request outlives its original capture generation.
   // Bypass only our exact global wrapper so its owner cannot also record.

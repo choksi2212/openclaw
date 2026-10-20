@@ -7,7 +7,7 @@ import {
 } from "../plugins/provider-runtime.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import { formatErrorMessage } from "./errors.js";
-import { resolveFetch } from "./fetch.js";
+import { forwardWrapsAmbientGlobalFetch, resolveFetch } from "./fetch.js";
 import { resolveProxyFetchFromEnv } from "./net/proxy-fetch.js";
 import { type ProviderAuth, resolveProviderAuths } from "./provider-usage.auth.js";
 import {
@@ -129,7 +129,7 @@ export async function loadProviderUsageSummary(
               email: auth.email,
               timeoutMs,
               signal,
-              fetchFn: (input, init) => {
+              fetchFn: forwardWrapsAmbientGlobalFetch(fetchFn, (input, init) => {
                 signal.throwIfAborted();
                 const callerSignal =
                   init?.signal === undefined && input instanceof Request
@@ -139,7 +139,7 @@ export async function loadProviderUsageSummary(
                   ...init,
                   signal: callerSignal ? AbortSignal.any([signal, callerSignal]) : signal,
                 });
-              },
+              }),
             },
           });
           return (

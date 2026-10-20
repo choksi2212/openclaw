@@ -178,7 +178,17 @@ const OPENROUTER_USAGE_RESPONSE_MAX_BYTES = 1024 * 1024;
 type EndpointResult =
   | { ok: true; data: Record<string, unknown> }
   | { ok: false; status: number }
-  | { ok: false; reason: "malformed" | "transport" };
+  | { ok: false; reason: "malformed" | "transport"; transportError?: unknown };
+
+function describeUsageTransportError(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = (error.cause as { message?: unknown } | null | undefined)?.message;
+    const causeSuffix =
+      typeof cause === "string" && cause.trim() && cause !== error.message ? ` (${cause})` : "";
+    return `${error.message}${causeSuffix}`.trim() || "fetch failed";
+  }
+  return String(error);
+}
 
 type OpenRouterLimitReset = "daily" | "weekly" | "monthly";
 
@@ -527,8 +537,8 @@ export default defineSingleProviderPluginEntry({
               policy: ssrfPolicy,
               auditContext: "openrouter-usage",
             });
-          } catch {
-            return { ok: false, reason: "transport" };
+          } catch (error) {
+            return { ok: false, reason: "transport", transportError: error };
           }
           try {
             const { response } = guardedResponse;
@@ -570,11 +580,18 @@ export default defineSingleProviderPluginEntry({
           const transportFailed = [creditsResult, keyResult].some(
             (result) => "reason" in result && result.reason === "transport",
           );
+          const transportDetail = [creditsResult, keyResult]
+            .map((result) => ("reason" in result ? result.transportError : undefined))
+            .find((detail) => detail !== undefined);
+          const usageUnavailableMessage =
+            transportDetail === undefined
+              ? "Usage unavailable"
+              : `Usage unavailable: ${describeUsageTransportError(transportDetail)}`;
           return {
             provider: "openrouter",
             displayName: "OpenRouter",
             windows: [],
-            error: transportFailed ? "Usage unavailable" : "Malformed usage response",
+            error: transportFailed ? usageUnavailableMessage : "Malformed usage response",
           };
         }
         const credits = creditsResult.ok ? creditsResult.data : undefined;

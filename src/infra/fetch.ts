@@ -15,6 +15,44 @@ type FetchWithAbortSignalMarker = typeof fetch & {
   [wrapFetchWithAbortSignalMarker]?: true;
 };
 
+// Stamp wrappers whose transport is the ambient global fetch. Dispatcher-aware
+// callers use the stamp to avoid handing those wrappers request dispatchers
+// from a foreign undici generation, which Node's built-in fetch rejects.
+const wrapsAmbientGlobalFetchMarker = Symbol.for("openclaw.fetch.wraps-ambient-global-fetch");
+
+type FetchWithAmbientGlobalFetchMarker = typeof fetch & {
+  [wrapsAmbientGlobalFetchMarker]?: true;
+};
+
+/** Stamps a fetch wrapper as forwarding to the ambient global fetch. */
+export function markWrapsAmbientGlobalFetch(fetchImpl: typeof fetch): void {
+  Object.defineProperty(fetchImpl, wrapsAmbientGlobalFetchMarker, {
+    value: true,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+}
+
+/** Returns true for wrappers known to forward to the ambient global fetch. */
+export function isWrapperOfAmbientGlobalFetch(fetchImpl: typeof fetch | undefined): boolean {
+  return (
+    typeof fetchImpl === "function" &&
+    (fetchImpl as FetchWithAmbientGlobalFetchMarker)[wrapsAmbientGlobalFetchMarker] === true
+  );
+}
+
+/** Copies the ambient-global-fetch wrapper stamp onto a derived wrapper. */
+export function forwardWrapsAmbientGlobalFetch<T extends typeof fetch>(
+  source: typeof fetch | undefined,
+  target: T,
+): T {
+  if (isWrapperOfAmbientGlobalFetch(source)) {
+    markWrapsAmbientGlobalFetch(target);
+  }
+  return target;
+}
+
 function withDuplex(
   init: RequestInit | undefined,
   input: RequestInfo | URL,
@@ -98,6 +136,10 @@ export function wrapFetchWithAbortSignal(fetchImpl: typeof fetch): typeof fetch 
     configurable: false,
     writable: false,
   });
+
+  if (fetchImpl === globalThis.fetch) {
+    markWrapsAmbientGlobalFetch(wrappedFetch);
+  }
 
   return wrappedFetch;
 }

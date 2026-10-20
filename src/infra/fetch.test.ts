@@ -1,7 +1,12 @@
 // Covers fetch resolution and abort-signal wrapping.
 import { describe, expect, it, vi } from "vitest";
 import { withFetchPreconnect } from "../test-utils/fetch-mock.js";
-import { resolveFetch, wrapFetchWithAbortSignal } from "./fetch.js";
+import {
+  forwardWrapsAmbientGlobalFetch,
+  isWrapperOfAmbientGlobalFetch,
+  resolveFetch,
+  wrapFetchWithAbortSignal,
+} from "./fetch.js";
 
 async function waitForMicrotaskTurn(): Promise<void> {
   await new Promise<void>((resolve) => {
@@ -313,5 +318,33 @@ describe("resolveFetch", () => {
     } finally {
       vi.stubGlobal("fetch", previousFetch);
     }
+  });
+});
+
+describe("ambient global fetch wrapper stamp", () => {
+  it("stamps resolveFetch() output as wrapping the ambient global fetch", () => {
+    expect(isWrapperOfAmbientGlobalFetch(resolveFetch())).toBe(true);
+  });
+
+  it("does not stamp wrappers around caller-provided fetch implementations", () => {
+    const inner = vi.fn(async () => new Response("ok")) as unknown as typeof fetch;
+    expect(isWrapperOfAmbientGlobalFetch(resolveFetch(inner))).toBe(false);
+  });
+
+  it("forwards the stamp onto derived wrappers only when the source carries it", () => {
+    const markedSource = resolveFetch();
+    const markedDerived = vi.fn(async () => new Response("ok")) as unknown as typeof fetch;
+    const unmarkedSource = resolveFetch(
+      vi.fn(async () => new Response("ok")) as unknown as typeof fetch,
+    );
+    const unmarkedDerived = vi.fn(async () => new Response("ok")) as unknown as typeof fetch;
+    expect(
+      isWrapperOfAmbientGlobalFetch(forwardWrapsAmbientGlobalFetch(markedSource, markedDerived)),
+    ).toBe(true);
+    expect(
+      isWrapperOfAmbientGlobalFetch(
+        forwardWrapsAmbientGlobalFetch(unmarkedSource, unmarkedDerived),
+      ),
+    ).toBe(false);
   });
 });

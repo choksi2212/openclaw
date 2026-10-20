@@ -182,7 +182,10 @@ describe("OpenRouter usage", () => {
       timeoutMs: 1000,
     });
     expect(fetchFn).not.toHaveBeenCalled();
-    expect(snapshot).toMatchObject({ provider: "openrouter", error: "Usage unavailable" });
+    expect(snapshot).toMatchObject({
+      provider: "openrouter",
+      error: expect.stringContaining("Usage unavailable"),
+    });
   });
 
   it("preserves explicitly allowed private-origin usage requests", async () => {
@@ -235,6 +238,19 @@ describe("OpenRouter usage", () => {
     }
   });
 
+  it("records the transport error behind an unavailable usage snapshot", async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      throw new TypeError("fetch failed", {
+        cause: new Error("invalid onRequestStart method"),
+      });
+    });
+
+    const snapshot = await fetchUsage(fetchFn, { baseUrl: proxyBaseUrl, timeoutMs: 1000 });
+
+    expect(snapshot.error).toContain("Usage unavailable");
+    expect(snapshot.error).toContain("invalid onRequestStart method");
+  });
+
   it("surfaces blocked usage redirects without replaying private credentials", async () => {
     const fetchFn = vi.fn<typeof fetch>(
       async () =>
@@ -249,7 +265,7 @@ describe("OpenRouter usage", () => {
     expect(snapshot).toMatchObject({
       provider: "openrouter",
       windows: [],
-      error: "Usage unavailable",
+      error: expect.stringContaining("Usage unavailable"),
     });
     expect(fetchFn).toHaveBeenCalledTimes(2);
     expectDestinations(fetchFn, proxyBaseUrl);
