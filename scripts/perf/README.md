@@ -877,6 +877,15 @@ Per-script Prometheus heap values sum all isolates of that script: compare the
 worker count and individual thread IDs before attributing a large script total
 to one retained cache. The raw worker/GC metric samples accompany the JSON report.
 
+For tail-latency attribution, add `--models-interval-ms 800` to issue independent
+`models.list` requests every 800 ms per viewer, staggered across viewers. With
+eight viewers this is ten requests per second throughout the steady phase.
+`workerRpcRequests` records scheduled and actual request times, with independent
+and after-churn cohorts separated; the latter also records each preceding
+history request. Delayed slots are skipped instead of generating catch-up bursts.
+This changes offered load, so compare identical settings on both sides and keep
+these diagnostic results separate from the original soak.
+
 The idle phase closes viewers and submits no more RPCs or turns. Natural memory
 samples continue before a final explicit collection of the main and worker
 isolates. Initial and final forced collections are marked in the report; worker
