@@ -7,11 +7,12 @@
 // OPENCLAW_CONTROL_UI_BUILD_ID supplies the matching identity outside a Git checkout.
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { buildSandboxHostPath } from "../src/agents/sandbox-host.js";
-import { createSandboxHostHttpServer } from "../src/gateway/mcp-app-sandbox-http.js";
+import { createSandboxHostHttpRequestHandler } from "../src/gateway/mcp-app-sandbox-http.js";
 import { captureSessionRowGeneration } from "../src/gateway/session-row-identity.js";
 import { shareSidebarSessionRows } from "../src/gateway/session-row-presentation.js";
 import { createColdLoadProbeInitScript } from "../ui/src/test-helpers/control-ui-cold-load-probes.ts";
@@ -394,7 +395,22 @@ async function selectComparisonBundle(index: number) {
   await server.replaceBuild(bundleSlots[index]!, bundleSlots[activeBundle]!);
   activeBundle = index;
 }
-const sandbox = createSandboxHostHttpServer();
+const dashboardFont = values["dashboard-widget"]
+  ? await readFile("ui/public/fonts/space-grotesk-latin.woff2")
+  : undefined;
+const dashboardFontPath = "/__openclaw__/bench/dashboard-font.woff2";
+const sandboxHandler = createSandboxHostHttpRequestHandler();
+const sandbox = createServer((request, response) => {
+  if (dashboardFont && request.url === dashboardFontPath) {
+    response.writeHead(200, {
+      "Content-Type": "font/woff2",
+      "Access-Control-Allow-Origin": "*",
+    });
+    response.end(dashboardFont);
+    return;
+  }
+  void sandboxHandler(request, response);
+});
 await new Promise<void>((resolve, reject) => {
   sandbox.once("error", reject);
   sandbox.listen(sandboxPort ?? 0, "127.0.0.1", resolve);
@@ -421,8 +437,8 @@ const fixture = createControlUiTeamScaleFixture({
   closedMenuMembers: values["closed-menu-members"],
   largeSnapshot: values["large-snapshot"],
   transcriptMessages,
-  dashboardWidgetFont: values["dashboard-widget"]
-    ? await readFile("ui/public/fonts/space-grotesk-latin.woff2")
+  dashboardWidgetFontUrl: dashboardFont
+    ? `http://127.0.0.1:${address.port}${dashboardFontPath}`
     : undefined,
 });
 const streamingReply = values["streaming-reply"] ? createControlUiStreamingReply() : undefined;
@@ -513,9 +529,6 @@ try {
     return asset
       ? route.fulfill({
           status: 200,
-          ...(asset.contentType === "font/woff2"
-            ? { headers: { "Access-Control-Allow-Origin": "*" } }
-            : {}),
           ...asset,
         })
       : route.fallback();
@@ -770,10 +783,20 @@ try {
     if (captureMs) {
       await page.waitForFunction((duration) => performance.now() >= duration, captureMs);
     }
-    const metrics = await page.evaluate(() => ({
-      ...Reflect.get(window, "__coldLoad").read(),
-      widgetReadiness: Reflect.get(window, "__readWidgetReadiness")(),
-    }));
+    const metrics = await page.evaluate(() => {
+      const pane = document.querySelector(".chat-pane-cache__pane--active");
+      const rows = pane ? [...pane.querySelectorAll(".chat-virtual-row")] : null;
+      return {
+        ...Reflect.get(window, "__coldLoad").read(),
+        widgetReadiness: Reflect.get(window, "__readWidgetReadiness")(),
+        finalTranscript: {
+          rows: rows?.length ?? null,
+          rowKeys: rows?.map((row) => row.getAttribute("data-virtual-row-key")) ?? null,
+          sessionKey: pane ? Reflect.get(pane, "sessionKey") : null,
+          ready: pane ? Reflect.get(pane, "transcriptReady") === true : false,
+        },
+      };
+    });
     const warmReload = values["warm-reload"]
       ? await page.evaluate(() => Reflect.get(window, "__warmReload").read())
       : undefined;

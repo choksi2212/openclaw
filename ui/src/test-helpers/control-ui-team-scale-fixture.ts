@@ -74,7 +74,7 @@ type FixtureOptions = {
   largeSnapshot?: boolean;
   transcriptMessages?: number;
   /** Opt into a scripted dashboard with an independently fetched web font. */
-  dashboardWidgetFont?: Buffer;
+  dashboardWidgetFontUrl?: string;
 };
 
 function widgetHtml(index: number) {
@@ -299,17 +299,10 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
     };
   });
   const boardPath = `/__openclaw__/board/${encodeURIComponent(selectedSessionKey)}/team-overview/index.html`;
-  const dashboardFontPath = "/__openclaw__/bench/dashboard-font.woff2";
-  if (options.dashboardWidgetFont) {
-    assets.set(dashboardFontPath, {
-      contentType: "font/woff2",
-      body: options.dashboardWidgetFont,
-    });
-  }
   assets.set(boardPath, {
     contentType: "text/html",
-    body: options.dashboardWidgetFont
-      ? dashboardWidgetHtml(new URL(dashboardFontPath, baseUrl).href)
+    body: options.dashboardWidgetFontUrl
+      ? dashboardWidgetHtml(options.dashboardWidgetFontUrl)
       : widgetHtml(0),
   });
   const sandbox = { sandboxUrl: options.sandboxUrl, sandboxPort: options.sandboxPort };
@@ -387,7 +380,7 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
       "progressCard.get",
       "cron.list",
       "cron.status",
-      ...(options.dashboardWidgetFont ? ["mcp.app.discover"] : []),
+      ...(options.dashboardWidgetFontUrl ? ["mcp.app.discover"] : []),
       ...(duplicateReads?.featureMethods ?? []),
     ],
     methodResponses: {
@@ -395,7 +388,7 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
         ? { "session.members.listEvidence": { sessionKey: selectedSessionKey, ...sharingMembers } }
         : {}),
       "question.list": { questions: [] },
-      ...(options.dashboardWidgetFont ? { "mcp.app.discover": { servers: [] } } : {}),
+      ...(options.dashboardWidgetFontUrl ? { "mcp.app.discover": { servers: [] } } : {}),
       ...(largeHistory ? { "chat.startup": largeHistory, "chat.history": largeHistory } : {}),
       ...duplicateReads?.methodResponses,
       "agents.list": agents,
