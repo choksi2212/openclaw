@@ -51,8 +51,26 @@ type QueueMessage = (
   options: { onQueueAccepted?: (accepted: boolean) => void },
   text: string,
 ) => Promise<void>;
+type Preparation = NonNullable<ReplyMessageInjectionOptions["toolAuthorityPreparation"]>;
+type Injection = NonNullable<ReplyBackendHandle["messageInjectionV2"]>;
+const acceptQueue: QueueMessage = async ({ onQueueAccepted }) => onQueueAccepted?.(true);
+const rejectQueue = async () => {
+  throw new Error("backend rejected");
+};
+const nextTask = () =>
+  new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 
-/** One running turn whose backend injection behavior is chosen per case. */
+function makeBackend(runId: string, injection: Omit<Injection, "version" | "isAvailable">) {
+  return {
+    kind: "embedded",
+    runId,
+    cancel() {},
+    messageInjectionV2: { version: 2, isAvailable: () => true, ...injection },
+  } satisfies ReplyBackendHandle;
+}
+
 function startTurn(
   params: {
     queueMessage?: QueueMessage;
@@ -61,22 +79,27 @@ function startTurn(
     nativeCommitSupport?: false;
     target?: SessionTarget;
     adapter?: SessionControllerSourceAdapter;
+    direct?: boolean;
   } = {},
 ) {
   const sessionKey = params.target?.sessionKey ?? key;
+  const sessionId = "steer-session";
   const operation = createReplyOperation({
     sessionKey,
-    sessionId: "steer-session",
+    sessionId,
     resetTriggered: false,
     target: params.target,
   });
   operation.setPhase("running");
-  const queueMessage = (text: string, options?: Parameters<QueueMessage>[0]) =>
-    (params.queueMessage ?? (async () => {}))(options ?? {}, text);
+  const injected: string[] = [];
+  const queueMessage = (text: string, options?: Parameters<QueueMessage>[0]) => {
+    injected.push(text);
+    return params.queueMessage?.(options ?? {}, text) ?? Promise.resolve();
+  };
   const backend = {
     kind: "embedded",
     runId: "steer-run",
-    cancel: () => {},
+    cancel() {},
     isCompacting: () => params.compacting === true,
     ...(params.injection === "legacy"
       ? { messageInjection: { isAvailable: () => true, queueMessage } }
@@ -92,23 +115,17 @@ function startTurn(
       abort: () => {},
       supportsTranscriptCommitWait: params.nativeCommitSupport,
     };
+    const { agentId } = operation;
     const registration = attachActiveEmbeddedRun(
-      operation.sessionId,
+      sessionId,
       native,
       sessionKey,
       undefined,
-      operation.agentId,
+      agentId,
       operation,
     );
     cleanups.push(() =>
-      detachActiveEmbeddedRun(
-        operation.sessionId,
-        native,
-        undefined,
-        undefined,
-        undefined,
-        registration,
-      ),
+      detachActiveEmbeddedRun(sessionId, native, undefined, undefined, undefined, registration),
     );
   }
   const input = reserveSessionControllerSource(sessionKey, {
@@ -121,11 +138,20 @@ function startTurn(
     retireSessionControllerInput(input);
     clearSessionControllerMailbox(input.mailbox, () => {});
   });
-  return { operation, input };
+  if (params.direct) {
+    retireSessionControllerInput(input);
+  }
+  return { operation, input, injected };
 }
 
-const steer = (input: SessionControllerInput) =>
-  submitSessionControllerSteer({ input, text: "steer", options: { steeringMode: "all" } });
+function steer(
+  input: SessionControllerInput,
+  options: ReplyMessageInjectionOptions = { steeringMode: "all" },
+  target?: ReturnType<typeof captureCurrentReplyMessageInjectionTarget>,
+  text = "steer",
+) {
+  return submitSessionControllerSteer({ input, text, options, target });
+}
 
 function directSteer(
   operation: ReturnType<typeof startTurn>["operation"],
@@ -149,24 +175,37 @@ function expectQueued(input: SessionControllerInput) {
   expect(input.mailbox.entries).toContain(input);
 }
 
+function expectNoInput(input: SessionControllerInput) {
+  expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
+}
+
+function preparation(overrides: Partial<Preparation> = {}): Preparation {
+  return {
+    authorityKind: "run",
+    assertCurrent() {},
+    compatAssertCurrent() {},
+    async prepareCurrent() {},
+    ...overrides,
+  };
+}
+
+function expectRejected(result: ReturnType<typeof steer>, reason: string) {
+  return expect(result).resolves.toMatchObject({ status: "rejected", reason });
+}
+
 describe("submitSessionControllerSteer", () => {
   it("preserves the published backend transcript-wait contract without a native capability observation", async () => {
     const received: unknown[] = [];
     const operation: NonNullable<AgentHarnessAttemptParams["replyOperation"]> =
       startTurn().operation;
-    operation.attachBackend({
-      kind: "embedded",
-      runId: "public-backend",
-      cancel() {},
-      messageInjectionV2: {
-        version: 2,
-        isAvailable: () => true,
+    operation.attachBackend(
+      makeBackend("public-backend", {
         queueMessage: async (text, options, assertCurrent) => {
           assertCurrent();
           received.push({ text, waitForTranscriptCommit: options?.waitForTranscriptCommit });
         },
-      },
-    });
+      }),
+    );
     const target = captureCurrentReplyMessageInjectionTarget(operation.key)!;
     const attempt = await beginReplyMessageInjectionTarget(target, "published input", {
       waitForTranscriptCommit: true,
@@ -179,52 +218,55 @@ describe("submitSessionControllerSteer", () => {
   it.each([false, true])(
     "checks source authority before guarded legacy injection (revoked=%s)",
     async (revoked) => {
-      let injected = false;
-      const { input } = startTurn({
-        injection: "legacy",
-        queueMessage: async () => {
-          injected = true;
-        },
-      });
+      const { input, injected } = startTurn({ injection: "legacy" });
       const authorityError = new Error("source revoked");
-      const result = submitSessionControllerSteer({
-        input,
-        text: "steer",
-        options: {
-          assertCurrent() {
-            input.abortSignal.throwIfAborted();
-            if (revoked) {
-              throw authorityError;
-            }
-          },
+      const result = steer(input, {
+        assertCurrent() {
+          input.abortSignal.throwIfAborted();
+          if (revoked) {
+            throw authorityError;
+          }
         },
       });
 
       if (revoked) {
         await expect(result).rejects.toBe(authorityError);
       } else {
-        await expect(result).resolves.toMatchObject({
-          status: "rejected",
-          reason: "guarded_injection_unsupported",
-        });
+        await expectRejected(result, "guarded_injection_unsupported");
         expectQueued(input);
       }
-      expect(injected).toBe(false);
+      expect(injected).toEqual([]);
     },
   );
 
-  it("consumes an accepted steer into the captured turn", async () => {
-    const { input } = startTurn({
-      queueMessage: async ({ onQueueAccepted }) => onQueueAccepted?.(true),
+  it.each([
+    [false, "accepted"],
+    [false, "rejected"],
+    [true, "accepted"],
+    [true, "rejected"],
+  ] as const)("settles a %s direct steer that is %s", async (direct, status) => {
+    const { input, operation } = startTurn({
+      direct,
+      queueMessage: status === "accepted" ? acceptQueue : rejectQueue,
     });
-
-    await expect(steer(input)).resolves.toEqual({
-      status: "accepted",
-      targetRunId: "steer-run",
-      result: undefined,
-    });
-    await input.settlement.promise;
-    expect(input.phase).toBe("consumed");
+    const result = direct ? directSteer(operation) : steer(input);
+    if (status === "accepted") {
+      await expect(result).resolves.toEqual({
+        status: "accepted",
+        targetRunId: "steer-run",
+        result: undefined,
+      });
+      await input.settlement.promise;
+      expect(input.phase).toBe("consumed");
+    } else {
+      await expectRejected(result, "runtime_rejected");
+      if (!direct) {
+        expectQueued(input);
+      }
+    }
+    if (direct) {
+      expectNoInput(input);
+    }
   });
 
   it("keeps accepted steering with the active restart owner until its native outcome settles", async () => {
@@ -242,8 +284,7 @@ describe("submitSessionControllerSteer", () => {
     try {
       await accepted.promise;
       markGatewayRestartDraining();
-      expect(input.phase).toBe("injecting");
-      expect(input.abortSignal.aborted).toBe(false);
+      expect(input).toMatchObject({ phase: "injecting", abortSignal: { aborted: false } });
       expect(operation.abortSignal.aborted).toBe(false);
 
       const outcome = await stopSession({
@@ -272,20 +313,6 @@ describe("submitSessionControllerSteer", () => {
     }
   });
 
-  it("leaves a definitely rejected steer queued for its followup", async () => {
-    const { input } = startTurn({
-      queueMessage: async () => {
-        throw new Error("backend rejected");
-      },
-    });
-
-    await expect(steer(input)).resolves.toMatchObject({
-      status: "rejected",
-      reason: "runtime_rejected",
-    });
-    expectQueued(input);
-  });
-
   it("keeps custody of an indeterminate steer and never returns it to the queue", async () => {
     const receipt = createDeferredCore();
     const { input } = startTurn({ queueMessage: () => receipt.promise });
@@ -309,7 +336,7 @@ describe("submitSessionControllerSteer", () => {
     const { input } = startTurn({
       injection,
       compacting: true,
-      queueMessage: async ({ onQueueAccepted }) => onQueueAccepted?.(true),
+      queueMessage: acceptQueue,
     });
 
     const result = await steer(input);
@@ -322,55 +349,35 @@ describe("submitSessionControllerSteer", () => {
   });
 
   it("leaves a transcript-wait steer queued when the backend cannot confirm commits", async () => {
-    let injected = false;
-    const { input } = startTurn({
-      nativeCommitSupport: false,
-      queueMessage: async () => {
-        injected = true;
-      },
-    });
+    const { input, injected } = startTurn({ nativeCommitSupport: false });
     const accepted: boolean[] = [];
 
-    await expect(
-      submitSessionControllerSteer({
-        input,
-        text: "steer",
-        options: {
-          waitForTranscriptCommit: true,
-          onQueueAccepted: (value) => accepted.push(value),
-        },
+    await expectRejected(
+      steer(input, {
+        waitForTranscriptCommit: true,
+        onQueueAccepted: (value) => accepted.push(value),
       }),
-    ).resolves.toMatchObject({ status: "rejected", reason: "transcript_commit_wait_unsupported" });
-    expect(injected).toBe(false);
-    // The caller's own fallback learns of the refusal through its acceptance callback.
+      "transcript_commit_wait_unsupported",
+    );
+    expect(injected).toEqual([]);
     expect(accepted).toEqual([false]);
     expectQueued(input);
   });
 
   it("keeps released observations stable while a yielded turn refuses captured injection", async () => {
-    let injected = false;
-    const { operation, input } = startTurn({
-      queueMessage: async () => {
-        injected = true;
-      },
-    });
+    const { operation, input, injected } = startTurn();
     const target = captureCurrentReplyMessageInjectionTarget(key);
     const released: NonNullable<AgentHarnessAttemptParams["replyOperation"]> = operation;
     const internal = readSessionControllerOperationState(operation);
-    expect(released.phase).toBe("running");
-    expect(released.result).toBeNull();
+    expect(released).toMatchObject({ phase: "running", result: null });
 
     expect(operation.yield()).toBe(true);
     expect(operation.yield()).toBe(false);
     expect(internal?.phase).toBe("yielded");
-    expect(released.phase).toBe("running");
-    expect(released.result).toBeNull();
-    expect(released.turnKind).toBe("visible");
+    expect(released).toMatchObject({ phase: "running", result: null, turnKind: "visible" });
 
-    await expect(
-      submitSessionControllerSteer({ input, target, text: "late", options: {} }),
-    ).resolves.toMatchObject({ status: "rejected", reason: "not_running" });
-    expect(injected).toBe(false);
+    await expectRejected(steer(input, {}, target, "late"), "not_running");
+    expect(injected).toEqual([]);
     expectQueued(input);
     operation.complete();
     await released.ownerSettlement;
@@ -409,8 +416,7 @@ describe("submitSessionControllerSteer", () => {
       const preparing = createDeferredCore();
       const resume = createDeferredCore();
       let current = true;
-      let injected = false;
-      const { input, operation } = startTurn({
+      const { input, operation, injected } = startTurn({
         adapter: {
           authority: {
             assertCurrent() {
@@ -420,24 +426,14 @@ describe("submitSessionControllerSteer", () => {
             },
           },
         },
-        queueMessage: async () => {
-          injected = true;
-        },
       });
-      const result = submitSessionControllerSteer({
-        input,
-        text: "prepared steer",
-        options: {
-          toolAuthorityPreparation: {
-            authorityKind: "run",
-            assertCurrent() {},
-            compatAssertCurrent() {},
-            async prepareCurrent() {
-              preparing.resolve();
-              await resume.promise;
-            },
+      const result = steer(input, {
+        toolAuthorityPreparation: preparation({
+          async prepareCurrent() {
+            preparing.resolve();
+            await resume.promise;
           },
-        },
+        }),
       });
       const rejected = expect(result).rejects.toThrow(
         disposition === "cancelled" ? "source cancelled" : "source revoked",
@@ -453,7 +449,7 @@ describe("submitSessionControllerSteer", () => {
       await rejected;
       await input.settlement.promise;
       expect(input.phase).toBe("consumed");
-      expect(injected).toBe(false);
+      expect(injected).toEqual([]);
       expect(operation.abortSignal.aborted).toBe(false);
     },
   );
@@ -462,33 +458,21 @@ describe("submitSessionControllerSteer", () => {
     const { input, operation } = startTurn();
     const target = captureCurrentReplyMessageInjectionTarget(key);
     let injected = false;
-    operation.attachBackend({
-      kind: "embedded",
-      runId: "replacement-run",
-      cancel() {},
-      messageInjectionV2: {
-        version: 2,
-        isAvailable: () => true,
+    operation.attachBackend(
+      makeBackend("replacement-run", {
         async queueMessage() {
           injected = true;
         },
-      },
-    });
+      }),
+    );
 
-    await expect(
-      submitSessionControllerSteer({ input, target, text: "late steer", options: {} }),
-    ).resolves.toMatchObject({ status: "rejected", reason: "no_active_run" });
+    await expectRejected(steer(input, {}, target, "late steer"), "no_active_run");
     expect(injected).toBe(false);
     expectQueued(input);
   });
 
   it("captures deferred message text and caller policy after preparation under input custody", async () => {
-    const injected: string[] = [];
-    const { input, operation } = startTurn({
-      queueMessage: async (_options, text) => {
-        injected.push(text);
-      },
-    });
+    const { input, operation, injected } = startTurn();
     await operation.bindToolAuthoritySnapshotAsync({
       fingerprint: () => "prepared-policy",
       fingerprintAsync: async () => "prepared-policy",
@@ -498,11 +482,7 @@ describe("submitSessionControllerSteer", () => {
     await operation.bindToolAuthorityRouteAsync({ provider: "synthetic", model: "test" });
     const options: ReplyMessageInjectionOptions = {
       isInboundUserMessage: true,
-      toolAuthorityPreparation: {
-        authorityKind: "run",
-        assertCurrent() {},
-        compatAssertCurrent() {},
-        async prepareCurrent() {},
+      toolAuthorityPreparation: preparation({
         async prepareMessage() {
           expect(input.phase).toBe("injecting");
           options.toolAuthorityOverlay = {
@@ -512,107 +492,73 @@ describe("submitSessionControllerSteer", () => {
           };
           return "prepared message";
         },
-      },
+      }),
     };
 
-    await expect(
-      submitSessionControllerSteer({ input, text: "unprepared", options }),
-    ).resolves.toMatchObject({ status: "accepted" });
+    await expect(steer(input, options, undefined, "unprepared")).resolves.toMatchObject({
+      status: "accepted",
+    });
     expect(injected).toEqual(["prepared message"]);
   });
 });
 
 describe("steerSessionControllerOperation", () => {
   it("retries a refused transcript wait through a fresh direct-operation reservation", async () => {
-    const injected: string[] = [];
     const accepted: boolean[] = [];
-    const { operation, input } = startTurn({
+    const { operation, input, injected } = startTurn({
+      direct: true,
       nativeCommitSupport: false,
-      queueMessage: async (_options, text) => {
-        injected.push(text);
-      },
     });
-    retireSessionControllerInput(input);
     const options = {
       assertCurrent: () => operation.abortSignal.throwIfAborted(),
       onQueueAccepted: (value: boolean) => accepted.push(value),
     };
 
-    await expect(
+    await expectRejected(
       directSteer(operation, { ...options, waitForTranscriptCommit: true }),
-    ).resolves.toMatchObject({ status: "rejected", reason: "transcript_commit_wait_unsupported" });
+      "transcript_commit_wait_unsupported",
+    );
     expect(injected).toEqual([]);
     expect(accepted).toEqual([false]);
-    expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
+    expectNoInput(input);
 
     await expect(directSteer(operation, options)).resolves.toMatchObject({ status: "accepted" });
     expect(injected).toEqual(["steer"]);
     expect(accepted).toEqual([false, true]);
-    expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
+    expectNoInput(input);
   });
 
   it("steers only the captured physical owner when logical session keys collide", async () => {
-    const injected: string[] = [];
     const sessionKey = "agent:main:controller-steer-physical";
-    const a = startTurn({
-      target: captureSessionTarget({ sessionKey, storeScope: "/synthetic/steer-a.sqlite" }),
-      queueMessage: async () => {
-        injected.push("a");
-      },
-    });
-    const b = startTurn({
-      target: captureSessionTarget({ sessionKey, storeScope: "/synthetic/steer-b.sqlite" }),
-      queueMessage: async () => {
-        injected.push("b");
-      },
-    });
-    retireSessionControllerInput(a.input);
-    retireSessionControllerInput(b.input);
+    const physicalTurn = (id: string) =>
+      startTurn({
+        target: captureSessionTarget({ sessionKey, storeScope: `/synthetic/steer-${id}.sqlite` }),
+        direct: true,
+      });
+    const a = physicalTurn("a");
+    const b = physicalTurn("b");
 
     await expect(directSteer(a.operation, {}, "only a")).resolves.toMatchObject({
       status: "accepted",
     });
-    expect(injected).toEqual(["a"]);
+    expect(a.injected).toEqual(["only a"]);
+    expect(b.injected).toEqual([]);
     expect(b.operation.abortSignal.aborted).toBe(false);
     expect(a.input.mailbox.entries).toEqual([]);
     expect(b.input.mailbox.entries).toEqual([]);
   });
 
-  it.each([
-    [
-      "accepted",
-      async ({ onQueueAccepted }: Parameters<QueueMessage>[0]) => onQueueAccepted?.(true),
-    ],
-    [
-      "rejected",
-      async () => {
-        throw new Error("backend rejected");
-      },
-    ],
-  ] as const)(
-    "leaves no input behind when the exact turn's steer is %s",
-    async (status, queueMessage) => {
-      const { operation, input } = startTurn({ queueMessage });
-      retireSessionControllerInput(input);
-
-      await expect(directSteer(operation)).resolves.toMatchObject({ status });
-      expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
-    },
-  );
-
   it("joins duplicate receipts without holding later input behind the first commit", async () => {
     // A native commit can wait on later input, such as the answer to a pending question.
     const commit = createDeferredCore();
-    const injected: string[] = [];
     const accepted: string[] = [];
-    const { operation, input } = startTurn({
-      queueMessage: async ({ onQueueAccepted }, text) => {
-        injected.push(text);
+    const { operation, injected } = startTurn({
+      direct: true,
+      queueMessage: async ({ onQueueAccepted }) => {
         onQueueAccepted?.(true);
         await commit.promise;
       },
     });
-    retireSessionControllerInput(input);
     const options = (text: string, caller: string): ReplyMessageInjectionOptions => ({
       ...transcriptOptions(text, text),
       onQueueAccepted: (value) => {
@@ -627,9 +573,7 @@ describe("steerSessionControllerOperation", () => {
     const second = directSteer(operation, options("second", "unrelated"), "second");
     try {
       // Admission and injection are promise continuations; one macrotask drains them all.
-      await new Promise((resolve) => {
-        setImmediate(resolve);
-      });
+      await nextTask();
       expect(injected).toEqual(["first", "second"]);
       expect(accepted).toEqual(["original", "duplicate", "unrelated"]);
     } finally {
@@ -644,15 +588,13 @@ describe("steerSessionControllerOperation", () => {
   });
 
   it("retains the receipt when a synchronous backend throws after accepting input", async () => {
-    const injected: string[] = [];
-    const { operation, input } = startTurn({
-      queueMessage: ({ onQueueAccepted }, text) => {
-        injected.push(text);
+    const { operation, input, injected } = startTurn({
+      direct: true,
+      queueMessage: ({ onQueueAccepted }) => {
         onQueueAccepted?.(true);
         throw new Error("queue notification failed");
       },
     });
-    retireSessionControllerInput(input);
     const options = () => transcriptOptions("guidance", "accepted-before-throw");
 
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -663,47 +605,32 @@ describe("steerSessionControllerOperation", () => {
       });
     }
     expect(injected).toEqual(["guidance"]);
-    expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
+    expectNoInput(input);
   });
 
   it("fences an async injection when the same backend is attached again before its effect", async () => {
     const entered = createDeferredCore();
     const resume = createDeferredCore();
     let injected = false;
-    const { operation, input } = startTurn();
-    retireSessionControllerInput(input);
-    const backend: ReplyBackendHandle = {
-      kind: "embedded",
-      runId: "reattached-steer",
-      cancel() {},
-      messageInjectionV2: {
-        version: 2,
-        isAvailable: () => true,
-        async queueMessage() {
-          throw new Error("Expected asynchronous prepared injection");
-        },
-        async queueMessageAsync(_text, options, preparation) {
-          entered.resolve();
-          await resume.promise;
-          preparation.assertCurrent();
-          injected = true;
-          options?.onQueueAccepted?.(true);
-        },
+    const { operation } = startTurn({ direct: true });
+    const backend = makeBackend("reattached-steer", {
+      async queueMessage() {
+        throw new Error("Expected asynchronous prepared injection");
       },
-    };
-    operation.attachBackend(backend);
-    const result = steerSessionControllerOperation({
-      operation,
-      text: "stale guidance",
-      options: {
-        toolAuthorityPreparation: {
-          authorityKind: "run",
-          assertCurrent() {},
-          compatAssertCurrent() {},
-          async prepareCurrent() {},
-        },
+      async queueMessageAsync(_text, options, authority) {
+        entered.resolve();
+        await resume.promise;
+        authority.assertCurrent();
+        injected = true;
+        options?.onQueueAccepted?.(true);
       },
     });
+    operation.attachBackend(backend);
+    const result = directSteer(
+      operation,
+      { toolAuthorityPreparation: preparation() },
+      "stale guidance",
+    );
     const rejected = expect(result).rejects.toThrow(
       "Message injection authority is no longer current",
     );
@@ -721,16 +648,14 @@ describe("steerSessionControllerOperation", () => {
   it("keeps an outcome-only duplicate caller source-bound without leaking its acceptance rejection", async () => {
     const acknowledge = createDeferredCore();
     const commit = createDeferredCore();
-    const injected: string[] = [];
-    const { input } = startTurn({
-      queueMessage: async ({ onQueueAccepted }, text) => {
-        injected.push(text);
+    const { injected } = startTurn({
+      direct: true,
+      queueMessage: async ({ onQueueAccepted }) => {
         await acknowledge.promise;
         onQueueAccepted?.(true);
         await commit.promise;
       },
     });
-    retireSessionControllerInput(input);
     const target = captureCurrentReplyMessageInjectionTarget(key);
     if (!target) {
       throw new Error("Expected the running turn's injection target");
@@ -753,9 +678,7 @@ describe("steerSessionControllerOperation", () => {
     try {
       current = false;
       acknowledge.resolve();
-      await new Promise((resolve) => {
-        setImmediate(resolve);
-      });
+      await nextTask();
       expect(injected).toEqual(["guidance"]);
     } finally {
       commit.resolve();
@@ -765,15 +688,14 @@ describe("steerSessionControllerOperation", () => {
   });
 
   it("refuses a turn that already settled without reserving input", async () => {
-    const { operation, input } = startTurn();
-    retireSessionControllerInput(input);
+    const { operation, input } = startTurn({ direct: true });
     operation.complete();
 
     await expect(directSteer(operation, {}, "late")).resolves.toEqual({
       status: "rejected",
       reason: "no_active_run",
     });
-    expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
+    expectNoInput(input);
   });
 });
 

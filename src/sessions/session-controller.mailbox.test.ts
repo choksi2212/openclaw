@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { createAgentRunRestartAbortError } from "../agents/run-termination.js";
 import { createQueueTestRun } from "../auto-reply/reply/queue.test-helpers.js";
 import { scheduleFollowupDrain } from "../auto-reply/reply/queue/drain.js";
@@ -31,13 +31,20 @@ import {
 } from "./session-controller.state.js";
 import { captureSessionTarget } from "./session-controller.target.js";
 const key = "agent:mailbox:test";
+const injectionCleanups: (() => Promise<void>)[] = [];
 function reserveSource(
-  options: Parameters<typeof reserveSessionControllerSource>[1] = { policy: { mode: "followup" } },
+  options: Partial<Parameters<typeof reserveSessionControllerSource>[1]> = {},
 ) {
-  return reserveSessionControllerSource(key, options);
+  return reserveSessionControllerSource(key, { policy: { mode: "followup" }, ...options });
 }
-function activeOperation(sessionId: string) {
-  return createReplyOperation({ sessionKey: key, sessionId, resetTriggered: false });
+function interruptSource(protocolRunId?: string) {
+  return reserveSource({ protocolRunId, policy: { mode: "interrupt" } });
+}
+function activeOperation(
+  sessionId: string,
+  options: Partial<Parameters<typeof createReplyOperation>[0]> = {},
+) {
+  return createReplyOperation({ sessionKey: key, sessionId, resetTriggered: false, ...options });
 }
 async function releaseClaim(claim: Parameters<typeof releaseSessionControllerClaim>[0]) {
   releaseSessionControllerClaim(claim);
@@ -45,14 +52,54 @@ async function releaseClaim(claim: Parameters<typeof releaseSessionControllerCla
 }
 function claimSource(input: Parameters<typeof tryClaimSessionControllerTask>[0]) {
   const claim = tryClaimSessionControllerTask(input);
-  expect(claim).toBeDefined();
-  if (!claim) {
-    throw new Error("expected selected source claim");
-  }
+  assert(claim, "expected selected source claim");
   return claim;
 }
+function observeAdmission(injection: ReturnType<typeof beginSessionControllerSourceInjection>) {
+  const admitted = vi.fn();
+  const pending = injection.admit().then((value) => {
+    admitted(value);
+    return value;
+  });
+  return { admitted, pending };
+}
+async function settleInputs(...inputs: ReturnType<typeof reserveSource>[]) {
+  for (const input of inputs) {
+    retireSessionControllerInput(input);
+  }
+  await Promise.all(
+    inputs.map(async (input) => {
+      await input.settlement.promise;
+      await input.claim?.settlement.promise;
+    }),
+  );
+}
+function finishInjections(
+  ...injections: ReturnType<typeof beginSessionControllerSourceInjection>[]
+) {
+  for (const injection of injections) {
+    injection.finish(false);
+  }
+}
+function cleanupInjections(
+  inputs: ReturnType<typeof reserveSource>[],
+  ...injections: ReturnType<typeof beginSessionControllerSourceInjection>[]
+) {
+  injectionCleanups.push(async () => {
+    finishInjections(...injections);
+    for (const input of inputs) {
+      if (input.claim) {
+        releaseSessionControllerClaim(input.claim);
+      }
+    }
+    await settleInputs(...inputs);
+  });
+}
 
-afterEach(() => {
+afterEach(async () => {
+  for (const cleanup of injectionCleanups.splice(0)) {
+    await cleanup();
+  }
   findSessionControllerEntry(key)?.active?.complete();
   clearFollowupQueue(key);
   vi.useRealTimers();
@@ -68,10 +115,8 @@ describe("controller mailbox scheduling", () => {
     vi.useFakeTimers();
     const sessionKey = "agent:main:dashboard:incognito-recovery-mailbox";
     const sessionId = "incognito-recovery-session";
-    const active = createReplyOperation({
+    const active = activeOperation(sessionId, {
       sessionKey,
-      sessionId,
-      resetTriggered: false,
       target: captureSessionTarget({
         storeScope: resolveIncognitoOpenClawAgentSqlitePath({ agentId: "main" }),
         sessionKey,
@@ -108,34 +153,54 @@ describe("controller mailbox scheduling", () => {
     } finally {
       active.complete();
       if (retry.controllerInput) {
-        retireSessionControllerInput(retry.controllerInput);
-        await retry.controllerInput.settlement.promise;
-        await retry.controllerInput.claim?.settlement.promise;
+        await settleInputs(retry.controllerInput);
       }
     }
   });
 
-  it("restores the selected pre-execution claim after its exact predecessor settles", async () => {
-    const selected = reserveSource();
-    const selectedClaim = claimSource(selected);
-    const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
-      policy: { mode: "followup" },
-    });
-
-    expect(selected.mailbox.claim).toBeUndefined();
-    expect(selected.mailbox.entries).toEqual([predecessor.input, selected]);
-    expect(selected.phase).toBe("claimed");
-
-    const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
-    await releaseClaim(predecessorClaim);
-
-    await expect(predecessor.restored).resolves.toBe(true);
-    expect(selected.mailbox.claim).toBe(selectedClaim);
-    expect(selected.claim).toBe(selectedClaim);
-    expect(selected.phase).toBe("claimed");
-
-    await releaseClaim(selectedClaim);
-  });
+  it.each(["settled", "cancelled", "interrupted"] as const)(
+    "restores pre-execution custody only after its %s predecessor permits it",
+    async (outcome) => {
+      const cancelled = new AbortController();
+      const selected = reserveSource(
+        outcome === "cancelled" ? { adapter: { signal: cancelled.signal } } : {},
+      );
+      const selectedClaim = claimSource(selected);
+      const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
+        policy: { mode: "followup" },
+      });
+      expect(selected.mailbox.claim).toBeUndefined();
+      expect(selected.mailbox.entries).toEqual([predecessor.input, selected]);
+      expect(selected.phase).toBe("claimed");
+      if (outcome === "cancelled") {
+        cancelled.abort(new Error("cancel selected source"));
+        await expect(predecessor.restored).resolves.toBe(false);
+        await releaseClaim(selectedClaim);
+      }
+      const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
+      const interrupt =
+        outcome === "interrupted"
+          ? claimSessionControllerTask(interruptSource(), () => {})
+          : undefined;
+      await releaseClaim(predecessorClaim);
+      if (interrupt) {
+        const priorityClaim = await interrupt;
+        expect(selected.mailbox.claim).toBe(priorityClaim);
+        expect(selected.mailbox.claim).not.toBe(selectedClaim);
+        await releaseClaim(priorityClaim);
+      }
+      if (outcome === "cancelled") {
+        expect(selected.mailbox.claim).not.toBe(selectedClaim);
+        expect(selected.retirementRequested).toBe(true);
+      } else {
+        await expect(predecessor.restored).resolves.toBe(true);
+        expect(selected.mailbox.claim).toBe(selectedClaim);
+        expect(selected.claim).toBe(selectedClaim);
+        expect(selected.phase).toBe("claimed");
+        await releaseClaim(selectedClaim);
+      }
+    },
+  );
 
   it("keeps later injection behind a preparing tail after joining a recovery predecessor", async () => {
     const selected = earlySource();
@@ -152,11 +217,7 @@ describe("controller mailbox scheduling", () => {
     const predecessorClaim = await claimSessionControllerTask(existing, () => {});
     const later = earlySource();
     const laterInjection = beginSessionControllerSourceInjection(later);
-    const admittedLater = vi.fn();
-    const laterAdmission = laterInjection.admit().then((admitted) => {
-      admittedLater(admitted);
-      return admitted;
-    });
+    const { admitted: admittedLater, pending: laterAdmission } = observeAdmission(laterInjection);
     const tailInjection = beginSessionControllerSourceInjection(tail);
     const tailAdmission = tailInjection.admit();
     try {
@@ -165,66 +226,13 @@ describe("controller mailbox scheduling", () => {
       tailInjection.finish(false);
       await expect(laterAdmission).resolves.toBe(true);
     } finally {
-      tailInjection.finish(false);
-      laterInjection.finish(false);
+      finishInjections(tailInjection, laterInjection);
       await releaseClaim(predecessorClaim);
       await predecessor.restored;
       releaseSessionControllerClaim(selectedClaim);
-      retireSessionControllerInput(tail);
-      retireSessionControllerInput(later);
-      await Promise.allSettled([
-        tailAdmission,
-        laterAdmission,
-        selectedClaim.settlement.promise,
-        tail.settlement.promise,
-        later.settlement.promise,
-      ]);
+      await settleInputs(tail, later);
+      await Promise.allSettled([tailAdmission, laterAdmission, selectedClaim.settlement.promise]);
     }
-  });
-
-  it("does not restore a selected claim cancelled during its predecessor", async () => {
-    const cancelled = new AbortController();
-    const selected = reserveSource({
-      policy: { mode: "followup" },
-      adapter: { signal: cancelled.signal },
-    });
-    const selectedClaim = claimSource(selected);
-    const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
-      policy: { mode: "followup" },
-    });
-
-    cancelled.abort(new Error("cancel selected source"));
-    await expect(predecessor.restored).resolves.toBe(false);
-    // Aborted admission returns its claim before independent recovery can run.
-    await releaseClaim(selectedClaim);
-    const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
-    await releaseClaim(predecessorClaim);
-
-    expect(selected.mailbox.claim).not.toBe(selectedClaim);
-    expect(selected.retirementRequested).toBe(true);
-  });
-
-  it("preserves a later interrupt before restoring the selected claim", async () => {
-    const selected = reserveSource();
-    const selectedClaim = claimSource(selected);
-    const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
-      policy: { mode: "followup" },
-    });
-    const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
-    const interrupt = reserveSource({ policy: { mode: "interrupt" } });
-    const interruptClaim = claimSessionControllerTask(interrupt, () => {});
-
-    await releaseClaim(predecessorClaim);
-    const priorityClaim = await interruptClaim;
-
-    expect(selected.mailbox.claim).toBe(priorityClaim);
-    expect(selected.mailbox.claim).not.toBe(selectedClaim);
-
-    await releaseClaim(priorityClaim);
-    await expect(predecessor.restored).resolves.toBe(true);
-    expect(selected.mailbox.claim).toBe(selectedClaim);
-
-    await releaseClaim(selectedClaim);
   });
 
   it.each(["ready", "task"] as const)(
@@ -251,8 +259,7 @@ describe("controller mailbox scheduling", () => {
         if (remaining) {
           await releaseClaim(remaining);
         }
-        retireSessionControllerInput(input);
-        await input.settlement.promise;
+        await settleInputs(input);
       }
     },
   );
@@ -325,10 +332,7 @@ describe("controller mailbox scheduling", () => {
     };
     enqueueFollowupRun(key, source("B"), { mode: "followup", debounceMs: 0 }, "none", dispatch);
     enqueueFollowupRun(key, source("C"), { mode: "followup", debounceMs: 0 }, "none", dispatch);
-    const d = reserveSource({
-      protocolRunId: " D ",
-      policy: { mode: "interrupt" },
-    });
+    const d = interruptSource(" D ");
     a.complete();
     expect(order).toEqual([]);
     const run = source("D");
@@ -341,14 +345,8 @@ describe("controller mailbox scheduling", () => {
     expect(order).toEqual(["B", "C"]);
   });
   it("canceling an older priority never clears the newest interrupt reservation", async () => {
-    const first = reserveSource({
-      protocolRunId: "old",
-      policy: { mode: "interrupt" },
-    });
-    const newest = reserveSource({
-      protocolRunId: "new",
-      policy: { mode: "interrupt" },
-    });
+    const first = interruptSource("old");
+    const newest = interruptSource("new");
     retireSessionControllerInput(first);
     expect(getExistingSessionControllerMailbox(key)?.priority).toBe(newest);
     const run = source("new");
@@ -362,7 +360,6 @@ describe("controller mailbox scheduling", () => {
     const cancel = vi.fn();
     const input = reserveSource({
       protocolRunId: " id ",
-      policy: { mode: "followup" },
       adapter: { cancel },
     });
     expect(input.protocolRunId).toBe(" id ");
@@ -392,21 +389,13 @@ describe("controller mailbox scheduling", () => {
     const task = claimSessionControllerTask(input, () => {
       order.push("native task");
     });
-    // Observe rejection before releasing the predecessor so a lost task cannot leak a rejection.
-    const selected = task.then(
-      (claim) => ({ ok: true as const, claim }),
-      (error: unknown) => ({ ok: false as const, error }),
-    );
+    // Observe early rejection; awaiting task below still fails the test.
+    void task.catch(() => {});
     let taskClaim: Awaited<typeof task> | undefined;
     try {
       expect(order).toEqual([]);
       active.complete();
-      const result = await selected;
-      expect(result.ok).toBe(true);
-      if (!result.ok) {
-        throw result.error;
-      }
-      taskClaim = result.claim;
+      taskClaim = await task;
       expect(order).toEqual(["before task", "native task"]);
       await releaseClaim(taskClaim);
       await after.controllerInput!.settlement.promise;
@@ -421,7 +410,7 @@ describe("controller mailbox scheduling", () => {
       await Promise.allSettled(
         [before, native, after].map((run) => run.controllerInput!.settlement.promise),
       );
-      await selected;
+      await Promise.allSettled([task]);
     }
   });
   it("does not replay a selected input when asynchronous source adoption fails", async () => {
@@ -451,15 +440,10 @@ it("clearFollowupQueue retains delayed native injection and source adoption unti
     { mode: "steer", debounceMs: 0 },
     async () => {},
   );
-  expect(reservation).toBeDefined();
-  if (!reservation) {
-    throw new Error("Missing injection reservation");
-  }
+  assert(reservation, "Missing injection reservation");
   expect(await reservation.admit()).toBe("steer");
   const input = run.controllerInput;
-  if (!input) {
-    throw new Error("Missing source input");
-  }
+  assert(input, "Missing source input");
   const injection = input.injection;
   const adoption = admitFollowupRunLifecycle(run);
   clearFollowupQueue(key);
@@ -482,7 +466,6 @@ it("clearFollowupQueue retains delayed native injection and source adoption unti
 function earlySource(adapter?: Parameters<typeof reserveSessionControllerSource>[1]["adapter"]) {
   return reserveSource({
     protocolRunId: " exact source ",
-    policy: { mode: "followup" },
     adapter,
   });
 }
@@ -503,94 +486,52 @@ describe("early source injection custody", () => {
     const first = earlySource();
     const second = earlySource();
     const b = beginSessionControllerSourceInjection(second);
-    const admittedSecond = vi.fn();
-    const secondAdmission = b.admit().then((admitted) => {
-      admittedSecond(admitted);
-      return admitted;
-    });
+    const { admitted: admittedSecond, pending: secondAdmission } = observeAdmission(b);
     const a = beginSessionControllerSourceInjection(first);
+    cleanupInjections([first, second], a, b);
     const firstAdmission = a.admit();
-    try {
-      await expect(
-        Promise.race([firstAdmission.then(() => "first"), secondAdmission.then(() => "second")]),
-      ).resolves.toBe("first");
-      await expect(firstAdmission).resolves.toBe(true);
-      expect(admittedSecond).not.toHaveBeenCalled();
-      a.finish(false);
-      await expect(beginSessionControllerSourceInjection(first).admit()).resolves.toBe(false);
-      await expect(secondAdmission).resolves.toBe(true);
-    } finally {
-      a.finish(false);
-      b.finish(false);
-      await Promise.allSettled([firstAdmission, secondAdmission]);
-      retireSessionControllerInput(first);
-      retireSessionControllerInput(second);
-    }
+    await expect(
+      Promise.race([firstAdmission.then(() => "first"), secondAdmission.then(() => "second")]),
+    ).resolves.toBe("first");
+    await expect(firstAdmission).resolves.toBe(true);
+    expect(admittedSecond).not.toHaveBeenCalled();
+    a.finish(false);
+    await expect(beginSessionControllerSourceInjection(first).admit()).resolves.toBe(false);
+    await expect(secondAdmission).resolves.toBe(true);
   });
 
   it("claims an earlier source while a later injection awaits its reservation", async () => {
     const first = earlySource();
     const second = earlySource();
     const injection = beginSessionControllerSourceInjection(second);
-    const admitted = vi.fn();
-    const pending = injection.admit().then((value) => {
-      admitted(value);
-      return value;
-    });
-    let claim: ReturnType<typeof tryClaimSessionControllerTask>;
-    try {
-      expect(admitted).not.toHaveBeenCalled();
-      claim = tryClaimSessionControllerTask(first);
-      expect(claim?.inputs).toEqual([first]);
-      expect(first.mailbox.claim).toBe(claim);
-      await expect(pending).resolves.toBe(true);
-      expect(first.claim).toBe(claim);
-      expect(first.phase).toBe("claimed");
-      expect(second.phase).toBe("injecting");
-      expect(admitted).toHaveBeenCalledExactlyOnceWith(true);
-    } finally {
-      injection.finish(false);
-      if (claim) {
-        releaseSessionControllerClaim(claim);
-      }
-      retireSessionControllerInput(first);
-      retireSessionControllerInput(second);
-      await Promise.allSettled([pending, first.settlement.promise, second.settlement.promise]);
-    }
+    cleanupInjections([first, second], injection);
+    const { admitted, pending } = observeAdmission(injection);
+    expect(admitted).not.toHaveBeenCalled();
+    const claim = tryClaimSessionControllerTask(first);
+    expect(claim?.inputs).toEqual([first]);
+    expect(first.mailbox.claim).toBe(claim);
+    await expect(pending).resolves.toBe(true);
+    expect(first.claim).toBe(claim);
+    expect([first.phase, second.phase]).toEqual(["claimed", "injecting"]);
+    expect(admitted).toHaveBeenCalledExactlyOnceWith(true);
   });
 
   it("keeps a later source behind older reservations when an interrupt bypasses them", async () => {
     const first = earlySource();
-    const interrupt = reserveSource({
-      protocolRunId: " interrupt ",
-      policy: { mode: "interrupt" },
-    });
+    const interrupt = interruptSource(" interrupt ");
     const last = earlySource();
     const c = beginSessionControllerSourceInjection(last);
-    const admittedLast = vi.fn();
-    const lastAdmission = c.admit().then((admitted) => {
-      admittedLast(admitted);
-      return admitted;
-    });
+    const { admitted: admittedLast, pending: lastAdmission } = observeAdmission(c);
     const b = beginSessionControllerSourceInjection(interrupt);
     const a = beginSessionControllerSourceInjection(first);
-    try {
-      await expect(b.admit()).resolves.toBe(true);
-      b.finish(false);
-      await Promise.resolve();
-      expect(admittedLast).not.toHaveBeenCalled();
-      await expect(a.admit()).resolves.toBe(true);
-      a.finish(false);
-      await expect(lastAdmission).resolves.toBe(true);
-    } finally {
-      a.finish(false);
-      b.finish(false);
-      c.finish(false);
-      await Promise.allSettled([lastAdmission]);
-      retireSessionControllerInput(first);
-      retireSessionControllerInput(interrupt);
-      retireSessionControllerInput(last);
-    }
+    cleanupInjections([first, interrupt, last], a, b, c);
+    await expect(b.admit()).resolves.toBe(true);
+    b.finish(false);
+    await Promise.resolve();
+    expect(admittedLast).not.toHaveBeenCalled();
+    await expect(a.admit()).resolves.toBe(true);
+    a.finish(false);
+    await expect(lastAdmission).resolves.toBe(true);
   });
 
   it("serializes exact attempts through outcome, without synthesizing FollowupRun", async () => {
@@ -602,11 +543,7 @@ describe("early source injection custody", () => {
     expect(first.source).toBeUndefined();
     expect(await a.admit()).toBe(false);
     expect(await beginSessionControllerSourceInjection(first).admit()).toBe(false);
-    const admitted = vi.fn();
-    const next = b.admit().then((value) => {
-      admitted(value);
-      return value;
-    });
+    const { admitted, pending: next } = observeAdmission(b);
     a.accepted(true);
     a.accepted(false);
     await Promise.resolve();
@@ -615,8 +552,7 @@ describe("early source injection custody", () => {
     // Acceptance wins even if a late caller mistakes the outcome for rejection.
     a.finish(false);
     expect(await next).toBe(true);
-    expect(first.phase).toBe("consumed");
-    expect(second.phase).toBe("injecting");
+    expect([first.phase, second.phase]).toEqual(["consumed", "injecting"]);
     // Old callbacks must not consume a same-ID sibling.
     a.accepted(true);
     a.finish(true);
@@ -695,8 +631,7 @@ describe("early source injection custody", () => {
     abortSessionControllerInput(second, "stop");
     expect(await pending).toBe(false);
     await captureSessionControllerSourceSettlement(second);
-    expect(first.phase).toBe("injecting");
-    expect(first.abortSignal.aborted).toBe(false);
+    expect(first).toMatchObject({ phase: "injecting", abortSignal: { aborted: false } });
     a.finish(true);
   });
 });
@@ -737,8 +672,7 @@ describe("committed source withdrawal", () => {
     expect(cancel).toHaveBeenCalledExactlyOnceWith(discarded);
     expect(input.withdrawalHolds).toBe(0);
     expect(selected).not.toHaveBeenCalled();
-    expect(successor.phase).toBe("preparing");
-    expect(successor.abortSignal.aborted).toBe(false);
+    expect(successor).toMatchObject({ phase: "preparing", abortSignal: { aborted: false } });
     retireSessionControllerInput(successor);
   });
 
@@ -789,10 +723,7 @@ describe("exact source cancellation authority", () => {
         cancel: cancelSource,
       });
       const claim = await claimSessionControllerTask(input, () => {});
-      const operation = createReplyOperation({
-        sessionKey: key,
-        sessionId: "causal-operation",
-        resetTriggered: false,
+      const operation = activeOperation("causal-operation", {
         mailboxClaim: claim,
         upstreamAbortSignal: claim.abortController.signal,
       });
@@ -826,12 +757,7 @@ describe("exact source cancellation authority", () => {
     const cancel = vi.fn();
     const input = earlySource({ cancel });
     const claim = await claimSessionControllerTask(input, () => {});
-    const operation = createReplyOperation({
-      sessionKey: key,
-      sessionId: "finishing",
-      resetTriggered: false,
-      mailboxClaim: claim,
-    });
+    const operation = activeOperation("finishing", { mailboxClaim: claim });
     operation.freezeAbort();
     expect(abortSessionControllerInput(input, "stop")).toBe(false);
     expect(input.abortSignal.aborted).toBe(false);
