@@ -147,7 +147,7 @@ it.each([
     facts: { parentPid: launcher, startIdentity: "100" },
   },
   {
-    name: "protected process with a reused parent PID",
+    name: "protected later-born process with a reused parent PID",
     sid: "S-1-5-21-100",
     facts: {
       parentPid: peer + 10,
@@ -155,6 +155,7 @@ it.each([
       executable: "C:\\Windows\\DefenderSessionHelper.exe",
     },
     parents: [{ pid: peer + 10, parentPid: 0, startIdentity: "400" }],
+    unverified: true,
   },
   {
     name: "unreadable process after the recorded family boot ended",
@@ -199,6 +200,13 @@ it.each([
     facts: { parentPid: launcher, startIdentity: "300" },
     parents: [{ pid: launcher, parentPid: 0, startIdentity: "400" }],
     matching: true,
+  },
+  {
+    name: "surviving grandchild after an unrecorded intermediate parent's PID is reused",
+    sid: "S-1-5-21-100",
+    facts: { parentPid: peer + 10, startIdentity: "300" },
+    parents: [{ pid: peer + 10, parentPid: 0, startIdentity: "400" }],
+    unverified: true,
   },
   {
     name: "surviving worker with an exited intermediate parent",

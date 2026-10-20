@@ -231,16 +231,12 @@ function classifyWindowsHandoffAncestry(
     ) {
       return "descendant";
     }
-    const parent = byPid.get(child.parentPid ?? 0);
-    // Equal births can be a child created in the same millisecond; only a later
-    // birth proves the current parent PID has been reused.
-    if (parent?.startIdentity && BigInt(parent.startIdentity) > BigInt(childStart)) {
-      return "unrelated";
-    }
     if (child.parentPid === 0 || child.parentPid === 4) {
       return "unrelated";
     }
-    if (!parent?.startIdentity) {
+    const parent = byPid.get(child.parentPid ?? 0);
+    // A missing or reused intermediate parent cannot disprove surviving descendants.
+    if (!parent?.startIdentity || BigInt(parent.startIdentity) > BigInt(childStart)) {
       break;
     }
     child = parent;
