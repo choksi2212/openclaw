@@ -256,7 +256,7 @@ it("borrows the exact in-band owner without interrupting or awaiting its own sta
 it("sharing can revoke a live turn while scoped effects remain subordinate to it", async () => {
   const target = targetFixture("live-sharing", "sharing-id");
   const operation = boundOperation(target);
-  const effect = await beginSessionEffect({ target, operation, assertAllowed: () => {} });
+  const effect = await beginSessionEffect({ target, operation });
   const run = vi.fn(async () => {});
   try {
     await runSessionMutation({ target, policy: "allow-live", run });
@@ -271,7 +271,7 @@ it("sharing can revoke a live turn while scoped effects remain subordinate to it
 
 it("release cannot manufacture completion while captured writer cleanup is still running", async () => {
   const target = targetFixture("retained-effect");
-  const effect = await beginSessionEffect({ target, assertAllowed: () => {} });
+  const effect = await beginSessionEffect({ target });
   const writer = pause();
   const running = effect.run(writer.run);
   await writer.started;
@@ -333,11 +333,7 @@ it("preempt interrupts a captured subordinate effect before running the mutation
   const target = targetFixture("preempt-effect", "preempt-effect-session");
   let releaseEffect = () => {};
   const interrupted = vi.fn(() => releaseEffect());
-  const effect = await beginSessionEffect({
-    target,
-    assertAllowed: () => {},
-    onInterrupt: interrupted,
-  });
+  const effect = await beginSessionEffect({ target, onInterrupt: interrupted });
   releaseEffect = effect.release;
   const run = vi.fn(async () => {});
 
@@ -531,7 +527,7 @@ it.each(["caller", "authority"] as const)(
 it("bounds preempt settlement with a typed mutation timeout", async () => {
   vi.useFakeTimers();
   const target = targetFixture("preempt-timeout", "preempt-timeout-session");
-  const effect = await beginSessionEffect({ target, assertAllowed: () => {} });
+  const effect = await beginSessionEffect({ target });
   const run = vi.fn(async () => {});
   const mutation = runSessionMutation({
     target,
@@ -610,10 +606,7 @@ for (const policy of ["wait", "preempt"] as const) {
     try {
       await runSessionMutation({
         target,
-        kind: "compaction",
-        ...(policy === "wait"
-          ? { policy }
-          : { policy, preempt: { activeRun: "abort-if-abortable", waitingInputs: "keep" } }),
+        ...(policy === "wait" ? { kind: "compaction" as const, policy } : compact),
         signal,
         run: async () => {
           order.push("compaction");

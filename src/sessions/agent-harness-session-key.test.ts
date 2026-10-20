@@ -85,9 +85,8 @@ it("rejects a caller-selected session id that would rotate a durable lock", () =
 
 it("does not turn plugin runtime observation into harness ownership", () => {
   const entry = {
-    modelSelectionLocked: true,
+    ...lockedEntry,
     sessionId: "ordinary-session",
-    agentHarnessId: "codex",
     pluginOwnerId: "model-owner",
   };
 
@@ -102,20 +101,14 @@ it("allows plugin-owned observations to change without releasing the lock or ide
     modelSelectionLocked: true,
     pluginOwnerId: "model-owner",
   };
-  const before = new Map([[ordinaryKey, entry]]);
   const next = { ...entry, agentHarnessId: "codex" };
-  const transition = (patch: Partial<typeof next>) =>
+  const transition = (patch: Partial<typeof next>, previous = entry) =>
     resolveAgentHarnessSessionStoreTransitionError({
-      before,
+      before: new Map([[ordinaryKey, previous]]),
       store: { [ordinaryKey]: { ...next, ...patch } },
     });
   expect(transition({})).toBeUndefined();
-  expect(
-    resolveAgentHarnessSessionStoreTransitionError({
-      before: new Map([[ordinaryKey, next]]),
-      store: { [ordinaryKey]: { ...next, agentHarnessId: "claude-cli" } },
-    }),
-  ).toBeUndefined();
+  expect(transition({ agentHarnessId: "claude-cli" }, next)).toBeUndefined();
   for (const patch of [
     { pluginOwnerId: undefined },
     { pluginOwnerId: "other" },

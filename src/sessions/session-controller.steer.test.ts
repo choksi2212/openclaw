@@ -111,17 +111,15 @@ function startTurn(
       ...backend,
       queueMessage,
       isStreaming: () => true,
-      isCompacting: () => params.compacting === true,
       abort: () => {},
       supportsTranscriptCommitWait: params.nativeCommitSupport,
     };
-    const { agentId } = operation;
     const registration = attachActiveEmbeddedRun(
       sessionId,
       native,
       sessionKey,
       undefined,
-      agentId,
+      operation.agentId,
       operation,
     );
     cleanups.push(() =>
@@ -193,6 +191,16 @@ function expectRejected(result: ReturnType<typeof steer>, reason: string) {
   return expect(result).resolves.toMatchObject({ status: "rejected", reason });
 }
 
+function revocableAuthority(message: string) {
+  const error = new Error(message);
+  const controller = new AbortController();
+  return {
+    error,
+    revoke: () => controller.abort(error),
+    assertCurrent: () => controller.signal.throwIfAborted(),
+  };
+}
+
 describe("submitSessionControllerSteer", () => {
   it("preserves the published backend transcript-wait contract without a native capability observation", async () => {
     const received: unknown[] = [];
@@ -219,18 +227,19 @@ describe("submitSessionControllerSteer", () => {
     "checks source authority before guarded legacy injection (revoked=%s)",
     async (revoked) => {
       const { input, injected } = startTurn({ injection: "legacy" });
-      const authorityError = new Error("source revoked");
+      const authority = revocableAuthority("source revoked");
+      if (revoked) {
+        authority.revoke();
+      }
       const result = steer(input, {
         assertCurrent() {
           input.abortSignal.throwIfAborted();
-          if (revoked) {
-            throw authorityError;
-          }
+          authority.assertCurrent();
         },
       });
 
       if (revoked) {
-        await expect(result).rejects.toBe(authorityError);
+        await expect(result).rejects.toBe(authority.error);
       } else {
         await expectRejected(result, "guarded_injection_unsupported");
         expectQueued(input);
@@ -348,20 +357,29 @@ describe("submitSessionControllerSteer", () => {
     }
   });
 
-  it("leaves a transcript-wait steer queued when the backend cannot confirm commits", async () => {
-    const { input, injected } = startTurn({ nativeCommitSupport: false });
+  it.each([false, true])("refuses unsupported transcript waits (direct=%s)", async (direct) => {
+    const { operation, input, injected } = startTurn({ direct, nativeCommitSupport: false });
     const accepted: boolean[] = [];
-
-    await expectRejected(
-      steer(input, {
-        waitForTranscriptCommit: true,
-        onQueueAccepted: (value) => accepted.push(value),
-      }),
-      "transcript_commit_wait_unsupported",
-    );
+    const options = {
+      onQueueAccepted: (value: boolean) => accepted.push(value),
+      ...(direct ? { assertCurrent: () => operation.abortSignal.throwIfAborted() } : {}),
+    };
+    const submit = (wait: boolean) => {
+      const request = wait ? { ...options, waitForTranscriptCommit: true } : options;
+      return direct ? directSteer(operation, request) : steer(input, request);
+    };
+    await expectRejected(submit(true), "transcript_commit_wait_unsupported");
     expect(injected).toEqual([]);
     expect(accepted).toEqual([false]);
-    expectQueued(input);
+    if (direct) {
+      expectNoInput(input);
+      await expect(submit(false)).resolves.toMatchObject({ status: "accepted" });
+      expect(injected).toEqual(["steer"]);
+      expect(accepted).toEqual([false, true]);
+      expectNoInput(input);
+    } else {
+      expectQueued(input);
+    }
   });
 
   it("keeps released observations stable while a yielded turn refuses captured injection", async () => {
@@ -415,17 +433,9 @@ describe("submitSessionControllerSteer", () => {
     async (disposition) => {
       const preparing = createDeferredCore();
       const resume = createDeferredCore();
-      let current = true;
+      const authority = revocableAuthority("source revoked");
       const { input, operation, injected } = startTurn({
-        adapter: {
-          authority: {
-            assertCurrent() {
-              if (!current) {
-                throw new Error("source revoked");
-              }
-            },
-          },
-        },
+        adapter: { authority },
       });
       const result = steer(input, {
         toolAuthorityPreparation: preparation({
@@ -442,7 +452,7 @@ describe("submitSessionControllerSteer", () => {
       if (disposition === "cancelled") {
         abortSessionControllerInput(input, new Error("source cancelled"));
       } else {
-        current = false;
+        authority.revoke();
       }
       resume.resolve();
 
@@ -503,31 +513,6 @@ describe("submitSessionControllerSteer", () => {
 });
 
 describe("steerSessionControllerOperation", () => {
-  it("retries a refused transcript wait through a fresh direct-operation reservation", async () => {
-    const accepted: boolean[] = [];
-    const { operation, input, injected } = startTurn({
-      direct: true,
-      nativeCommitSupport: false,
-    });
-    const options = {
-      assertCurrent: () => operation.abortSignal.throwIfAborted(),
-      onQueueAccepted: (value: boolean) => accepted.push(value),
-    };
-
-    await expectRejected(
-      directSteer(operation, { ...options, waitForTranscriptCommit: true }),
-      "transcript_commit_wait_unsupported",
-    );
-    expect(injected).toEqual([]);
-    expect(accepted).toEqual([false]);
-    expectNoInput(input);
-
-    await expect(directSteer(operation, options)).resolves.toMatchObject({ status: "accepted" });
-    expect(injected).toEqual(["steer"]);
-    expect(accepted).toEqual([false, true]);
-    expectNoInput(input);
-  });
-
   it("steers only the captured physical owner when logical session keys collide", async () => {
     const sessionKey = "agent:main:controller-steer-physical";
     const physicalTurn = (id: string) =>
@@ -661,22 +646,17 @@ describe("steerSessionControllerOperation", () => {
       throw new Error("Expected the running turn's injection target");
     }
     const options = () => transcriptOptions("guidance", "same-guidance");
-    let current = true;
-    const authorityError = new Error("duplicate source revoked");
+    const authority = revocableAuthority("duplicate source revoked");
     const first = await beginReplyMessageInjectionTarget(target, "guidance", options());
     const duplicate = await beginReplyMessageInjectionTarget(target, "guidance", {
       ...options(),
-      assertCurrent() {
-        if (!current) {
-          throw authorityError;
-        }
-      },
+      assertCurrent: authority.assertCurrent,
     });
     // Production adoption callers may await only outcome. The other receipt
     // still rejects on revocation and must not become an unhandled rejection.
-    const rejected = expect(duplicate.outcome).rejects.toBe(authorityError);
+    const rejected = expect(duplicate.outcome).rejects.toBe(authority.error);
     try {
-      current = false;
+      authority.revoke();
       acknowledge.resolve();
       await nextTask();
       expect(injected).toEqual(["guidance"]);
@@ -697,9 +677,6 @@ describe("steerSessionControllerOperation", () => {
     });
     expectNoInput(input);
   });
-});
-
-describe("findSessionControllerOperationByRunId", () => {
   it("resolves the slot-owning operation by its backend run ID only while it owns the slot", () => {
     const { operation } = startTurn();
 
