@@ -345,10 +345,23 @@ it.each([
     if (preexisting) {
       expect(await sendMessage(child, { prepare: true })).toMatchObject({ prepared: true });
     }
-    await controlGatewayProfile(child, kind, "start", profilePath, { includeWorkers: true });
-    const completed = await sendMessage(child, { run: true });
+    let completed: Awaited<ReturnType<typeof sendMessage>>;
+    if (kind === "heap") {
+      await measureGatewayAllocations(
+        child,
+        profilePath,
+        1,
+        async () => {
+          completed = await sendMessage(child, { run: true });
+        },
+        { includeWorkers: true },
+      );
+    } else {
+      await controlGatewayProfile(child, kind, "start", profilePath, { includeWorkers: true });
+      completed = await sendMessage(child, { run: true });
+      await controlGatewayProfile(child, kind, "stop", profilePath, { includeWorkers: true });
+    }
     expect(completed.complete).toBe(true);
-    await controlGatewayProfile(child, kind, "stop", profilePath, { includeWorkers: true });
     const manifest = await readJson<WorkerProfileManifest>(`${profilePath}.workers.json`);
     expect(manifest).toMatchObject({
       kind,

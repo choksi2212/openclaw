@@ -1558,16 +1558,23 @@ async function connectClient(index: number) {
   return client;
 }
 let cleanupPromise: Promise<void> | undefined;
+async function removeStressCron() {
+  if (!stressCronJobId) {
+    return;
+  }
+  const result = await clients[0]?.request("cron.remove", { id: stressCronJobId }, 5000);
+  if (!result?.ok) {
+    throw new Error("cron.remove did not succeed");
+  }
+  stressCronJobId = undefined;
+}
 function cleanup() {
   return (cleanupPromise ??= (async () => {
     closing = true;
     cohort?.release();
     if (stressCronJobId) {
       try {
-        const result = await clients[0]?.request("cron.remove", { id: stressCronJobId }, 5000);
-        if (!result?.ok) {
-          throw new Error("cron.remove did not succeed");
-        }
+        await removeStressCron();
       } catch (error) {
         console.warn("Stress cron cleanup failed; discard this fixture before reuse:", error);
       }
@@ -2373,66 +2380,6 @@ try {
       allocatedMbPerTurn: profile.sampledAllocatedBytes / 1_000_000 / completedTurns,
     };
   }
-  let retainedProfile;
-  if (soakScenario) {
-    await sampleMemory();
-    if (retainedProfileStartedAt !== undefined) {
-      // Preserve retained-profile collection without collecting the workers before their idle phase.
-      await readGatewayResources(gateway, { collectGarbage: true });
-      await controlGatewayProfile(gateway, "heap", "stop", retainedProfilePath);
-      const { sampledAllocatedBytes, topAllocationSites, ...profile } = readGatewayHeapProfile(
-        retainedProfilePath,
-        { includeCollectedObjects: false },
-      );
-      retainedProfile = {
-        ...profile,
-        startedAtEpochMs: retainedProfileStartedAt,
-        stoppedAtEpochMs: Date.now(),
-        sampledRetainedBytes: sampledAllocatedBytes,
-        topRetainedSites: topAllocationSites,
-      };
-    } else if (retainedProfileMs > 0) {
-      throw new Error("no retained profile window captured; shorten the round duration");
-    }
-    if (idleDurationMs > 0) {
-      if (values["worker-snapshots"]) {
-        const snapshots = await readGatewayResources(gateway, {
-          collectGarbage: true,
-          includeWorkers: true,
-          workerSnapshotPathPrefix: path.join(output, "steady"),
-        });
-        writeFileSync(
-          path.join(output, "steady-snapshot-resources.json"),
-          JSON.stringify(snapshots, null, 2),
-        );
-      }
-      for (const client of clients) {
-        client.close();
-      }
-      console.log("PHASE idle");
-      const idleStartedAt = Date.now();
-      while (Date.now() - idleStartedAt < idleDurationMs) {
-        await delay(Math.min(memoryIntervalMs, idleDurationMs - (Date.now() - idleStartedAt)));
-        await sampleMemory(false, "idle");
-      }
-    }
-    await sampleMemory(true, idleDurationMs > 0 ? "idle" : "steady");
-    if (values["heap-snapshot"] || values["worker-snapshots"]) {
-      const snapshots = await readGatewayResources(gateway, {
-        ...(values["heap-snapshot"]
-          ? { snapshotPath: path.join(output, "settled.heapsnapshot") }
-          : {}),
-        includeWorkers: workerMemory,
-        ...(values["worker-snapshots"]
-          ? { workerSnapshotPathPrefix: path.join(output, "settled") }
-          : {}),
-      });
-      writeFileSync(
-        path.join(output, "snapshot-resources.json"),
-        JSON.stringify(snapshots, null, 2),
-      );
-    }
-  }
   let diffEditVisibilityMs: number | undefined;
   if (values["mixed-rpc"] && stressWorktree && diffControlOriginal !== undefined) {
     writeFileSync(
@@ -2472,6 +2419,68 @@ try {
     );
     if (durationMs >= 60_000 && !cronRuns.length) {
       throw new Error("stress cron did not complete during the measured soak");
+    }
+    await removeStressCron();
+  }
+  let retainedProfile;
+  if (soakScenario) {
+    await sampleMemory();
+    if (retainedProfileStartedAt !== undefined) {
+      // Preserve retained-profile collection without collecting the workers before their idle phase.
+      await readGatewayResources(gateway, { collectGarbage: true });
+      await controlGatewayProfile(gateway, "heap", "stop", retainedProfilePath);
+      const { sampledAllocatedBytes, topAllocationSites, ...profile } = readGatewayHeapProfile(
+        retainedProfilePath,
+        { includeCollectedObjects: false },
+      );
+      retainedProfile = {
+        ...profile,
+        startedAtEpochMs: retainedProfileStartedAt,
+        stoppedAtEpochMs: Date.now(),
+        sampledRetainedBytes: sampledAllocatedBytes,
+        topRetainedSites: topAllocationSites,
+      };
+    } else if (retainedProfileMs > 0) {
+      throw new Error("no retained profile window captured; shorten the round duration");
+    }
+    if (idleDurationMs > 0) {
+      if (values["worker-snapshots"]) {
+        const snapshots = await readGatewayResources(gateway, {
+          collectGarbage: true,
+          includeWorkers: true,
+          workerSnapshotPathPrefix: path.join(output, "steady"),
+        });
+        writeFileSync(
+          path.join(output, "steady-snapshot-resources.json"),
+          JSON.stringify(snapshots, null, 2),
+        );
+      }
+      for (const client of clients) {
+        expectedClosures.add(client);
+        client.close();
+      }
+      console.log("PHASE idle");
+      const idleStartedAt = Date.now();
+      while (Date.now() - idleStartedAt < idleDurationMs) {
+        await delay(Math.min(memoryIntervalMs, idleDurationMs - (Date.now() - idleStartedAt)));
+        await sampleMemory(false, "idle");
+      }
+    }
+    await sampleMemory(true, idleDurationMs > 0 ? "idle" : "steady");
+    if (values["heap-snapshot"] || values["worker-snapshots"]) {
+      const snapshots = await readGatewayResources(gateway, {
+        ...(values["heap-snapshot"]
+          ? { snapshotPath: path.join(output, "settled.heapsnapshot") }
+          : {}),
+        includeWorkers: workerMemory,
+        ...(values["worker-snapshots"]
+          ? { workerSnapshotPathPrefix: path.join(output, "settled") }
+          : {}),
+      });
+      writeFileSync(
+        path.join(output, "snapshot-resources.json"),
+        JSON.stringify(snapshots, null, 2),
+      );
     }
   }
   // Process exit plus drained log streams makes promotion accounting independent of pipe buffering.
