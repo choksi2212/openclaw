@@ -100,8 +100,9 @@ async function inspectSqliteImage(
   const migrationRequired =
     schemaMigrationRequired || Object.values(pendingColumns).some((columns) => columns.length > 0);
   if (allowMigration && migrationRequired) {
-    // The family owner validates its historical shape before the private migration.
-    if (!descriptor.migrateSqliteSource) {
+    // Historical repairs use family admission; current first-use repairs still
+    // need the port's complete layout before preparing a private copy.
+    if (!schemaMigrationRequired || !descriptor.migrateSqliteSource) {
       inspectSqlitePortSchema(db, descriptor, pendingColumns);
     }
     return { version, migrationRequired };

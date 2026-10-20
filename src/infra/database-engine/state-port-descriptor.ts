@@ -24,12 +24,7 @@ import { admitSqliteSchema, getAdmittedSqliteSchemaFacts } from "../sqlite-schem
 import { extractSqliteTableSchema } from "../sqlite-schema-sql.js";
 import { withEngineStoreAdmission } from "./admission-scope.js";
 import { openEngineStore } from "./open.js";
-import {
-  DatabasePortDataError,
-  inspectSqlitePortSchema,
-  type PortDescriptor,
-  type PortTable,
-} from "./port-descriptor.js";
+import { DatabasePortDataError, type PortDescriptor, type PortTable } from "./port-descriptor.js";
 
 export async function loadStatePortDescriptor(
   sourceVersion = OPENCLAW_STATE_SCHEMA_VERSION,
@@ -151,9 +146,6 @@ export async function loadStatePortDescriptor(
       const pendingColumns: Record<string, readonly string[]> = needsPhaseColumn
         ? { agent_deletion_journal: ["phase"] }
         : {};
-      if (needsPhaseColumn) {
-        inspectSqlitePortSchema(db, descriptor, pendingColumns);
-      }
       // First-use columns are valid absent; porting completes them in its private copy.
       return { version, migrationRequired: false, pendingColumns };
     },

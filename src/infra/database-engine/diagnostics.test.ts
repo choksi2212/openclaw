@@ -146,7 +146,8 @@ describe("physical store diagnostics", () => {
       db.prepare(
         "INSERT INTO config_machine_state VALUES ('state.schema.contentVersion', ?, 1)",
       ).run(String(OPENCLAW_STATE_SCHEMA_VERSION));
-      db.exec(`ALTER TABLE agent_deletion_journal DROP COLUMN phase;
+      db.exec(`ALTER TABLE agent_database_leases DROP COLUMN provenance;
+        ALTER TABLE agent_deletion_journal DROP COLUMN phase;
         INSERT INTO agent_deletion_journal
           (agent_id, agent_dir, workspace_dir, sessions_dir, created_at)
         VALUES ('retired', '/retired/agent', '/retired/workspace', '/retired/sessions', 17)`);
