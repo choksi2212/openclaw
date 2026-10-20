@@ -117,11 +117,11 @@ vi.mock("../audit/audit-recorder.js", async (importOriginal) => {
         writer: {
           ready: Promise.resolve(),
           record: (event) => {
-            if (event.kind === "message") {
-              auditTestState.messages += 1;
-            } else {
-              auditTestState.recorded += 1;
-            }
+            auditTestState[event.kind === "message" ? "messages" : "recorded"] += 1;
+            return true;
+          },
+          recordRun: () => {
+            auditTestState.recorded += 2;
             return true;
           },
           recordExecutionIdentity: () => {
