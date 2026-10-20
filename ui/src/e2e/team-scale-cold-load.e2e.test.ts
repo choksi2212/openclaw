@@ -94,15 +94,17 @@ async function readStoredWarmState({ sessionKey }: { sessionKey: string }) {
 }
 
 suite.define(() => {
-  const sandbox = useCanvasSandboxFixture();
+  let sandboxAssets: ReturnType<typeof createControlUiTeamScaleFixture>["assets"] | undefined;
+  const sandbox = useCanvasSandboxFixture((pathname) => sandboxAssets?.get(pathname));
 
   it("loads a paged Team roster, pinned MCP dashboard, plugins, and inline widgets through a deep link", async () => {
+    const sandboxConfig = sandbox("");
     const fixture = createControlUiTeamScaleFixture({
       baseUrl: suite.server.baseUrl,
-      ...sandbox(""),
+      ...sandboxConfig,
       sandboxUrl: buildSandboxHostPath({
         blockDescendantFrames: true,
-        resourceDomains: [new URL(suite.server.baseUrl).origin],
+        resourceDomains: [`http://127.0.0.1:${sandboxConfig.sandboxPort}`],
       }),
       dashboardMcpApp: {
         font: await readFile(
@@ -110,6 +112,7 @@ suite.define(() => {
         ),
       },
     });
+    sandboxAssets = fixture.assets;
     await suite.withPage(
       {
         locale: "en-US",
@@ -225,15 +228,22 @@ suite.define(() => {
           .frameLocator("openclaw-board-view mcp-app-view iframe")
           .frameLocator("iframe");
         await dashboard.getByText("Team metric 1", { exact: true }).waitFor();
+        await dashboard.getByRole("img", { name: "Synthetic chart 4", exact: true }).waitFor();
         expect(await dashboard.getByRole("img", { name: /^Synthetic chart / }).count()).toBe(4);
-        expect(
-          await dashboard.locator("body").evaluate(async () => {
-            await document.fonts.ready;
-            return [...document.fonts].some(
-              (font) => font.family === "TeamMetric" && font.status === "loaded",
-            );
-          }),
-        ).toBe(true);
+        const fontState = await dashboard.locator("body").evaluate(async () => {
+          await document.fonts.ready;
+          return {
+            fonts: [...document.fonts].map((font) => ({
+              family: font.family,
+              status: font.status,
+            })),
+            resources: performance.getEntriesByType("resource").map((entry) => entry.name),
+          };
+        });
+        expect(fontState.fonts, JSON.stringify(fontState)).toContainEqual({
+          family: "TeamMetric",
+          status: "loaded",
+        });
         await page
           .frameLocator(".chat-tool-card__preview-frame")
           .last()

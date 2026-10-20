@@ -314,12 +314,18 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
   }
   const sandbox = { sandboxUrl: options.sandboxUrl, sandboxPort: options.sandboxPort };
   const dashboardAssetPath = "/__openclaw__/fixture-dashboard";
-  const dashboardStylesheetUrl = new URL(`${dashboardAssetPath}/dashboard.css`, baseUrl).href;
+  const dashboardAssetOrigin = options.sandboxPort
+    ? `http://127.0.0.1:${options.sandboxPort}`
+    : new URL(baseUrl).origin;
+  const dashboardStylesheetUrl = new URL(
+    `${dashboardAssetPath}/dashboard.css`,
+    dashboardAssetOrigin,
+  ).href;
   if (options.dashboardMcpApp) {
     assets.set(`${dashboardAssetPath}/dashboard.css`, {
       contentType: "text/css",
       headers: { "access-control-allow-origin": "*" },
-      body: `@font-face{font-family:TeamMetric;src:url("${new URL(`${dashboardAssetPath}/metrics.woff2`, baseUrl).href}") format("woff2");font-display:block}
+      body: `@font-face{font-family:TeamMetric;src:url("${new URL(`${dashboardAssetPath}/metrics.woff2`, dashboardAssetOrigin).href}") format("woff2");font-display:block}
 :root{color-scheme:dark light;font-family:TeamMetric,system-ui}body{margin:0;padding:20px}h2{font-size:22px}main{display:grid;grid-template-columns:1fr 1fr;gap:20px}section{padding:16px;border:1px solid #8993a4;border-radius:8px}h3{margin:0 0 12px;font-size:16px}svg{display:block;width:100%;color:#3b9c8c}`,
     });
     assets.set(`${dashboardAssetPath}/metrics.woff2`, {
@@ -463,7 +469,7 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
             "mcp.app.view": {
               ...sandbox,
               html: dashboardMcpAppHtml(dashboardStylesheetUrl),
-              csp: { resourceDomains: [new URL(baseUrl).origin] },
+              csp: { resourceDomains: [dashboardAssetOrigin] },
               toolInput: {},
               toolResult: { content: [{ type: "text", text: "Synthetic dashboard ready" }] },
               messageSupported: false,

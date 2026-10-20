@@ -11,7 +11,6 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { buildSandboxHostPath } from "../src/agents/sandbox-host.js";
-import { createSandboxHostHttpServer } from "../src/gateway/mcp-app-sandbox-http.js";
 import { captureSessionRowGeneration } from "../src/gateway/session-row-identity.js";
 import { shareSidebarSessionRows } from "../src/gateway/session-row-presentation.js";
 import { createColdLoadProbeInitScript } from "../ui/src/test-helpers/control-ui-cold-load-probes.ts";
@@ -26,6 +25,7 @@ import {
   startProductionControlUiE2eServer,
   startBuiltControlUiE2eServer,
 } from "../ui/src/test-helpers/control-ui-e2e.ts";
+import { createControlUiSandboxFixtureServer } from "../ui/src/test-helpers/control-ui-sandbox-fixture-server.ts";
 import { createTeamScaleSidebarListOwner } from "../ui/src/test-helpers/control-ui-sidebar-list-fixture.ts";
 import {
   createControlUiStreamingReply,
@@ -69,7 +69,10 @@ function readRigProbeSnapshot() {
 function installWidgetReadiness() {
   const ready = new Map<string, number>();
   window.addEventListener("message", (event) => {
-    if (event.data?.method !== "ui/notifications/sandbox-resource-loaded") {
+    if (
+      event.data?.method !== "ui/notifications/sandbox-resource-loaded" &&
+      event.data?.method !== "ui/notifications/initialized"
+    ) {
       return;
     }
     for (const [kind, selector] of [
@@ -85,8 +88,7 @@ function installWidgetReadiness() {
     }
   });
   Reflect.set(window, "__readWidgetReadiness", () => ({
-    measurement:
-      "sandbox resource-loaded notification after the widget document load; not a paint timestamp",
+    measurement: "HTML resource-loaded or MCP app initialized notification; not a paint timestamp",
     firstInlineReadyMs: [...ready].find(([key]) => key.startsWith("inline:"))?.[1] ?? null,
     firstBoardReadyMs: [...ready].find(([key]) => key.startsWith("board:"))?.[1] ?? null,
     ready: Object.fromEntries(ready),
@@ -242,6 +244,7 @@ const { values } = parseArgs({
     "live-start-at-ms": { type: "string" },
     "duplicate-boot-reads": { type: "boolean", default: false },
     "dashboard-mcp-app": { type: "boolean", default: false },
+    "chat-dashboard-route": { type: "boolean", default: false },
     "closed-menu-members": { type: "boolean", default: false },
     "capture-ms": { type: "string", default: "0" },
     "sidebar-row-transfer": { type: "string", default: "full" },
@@ -319,6 +322,9 @@ for (const value of values["method-latency-ms"]) {
 const face = values.face;
 if (face !== "chat" && face !== "dashboard") {
   throw new Error("Expected face chat or dashboard");
+}
+if (values["chat-dashboard-route"] && face !== "dashboard") {
+  throw new Error("chat-dashboard-route requires the dashboard face");
 }
 const frameGapMs = Number(values["frame-gap-ms"]);
 const captureMs = Number(values["capture-ms"]);
@@ -416,7 +422,7 @@ async function selectComparisonBundle(index: number) {
   await server.replaceBuild(bundleSlots[index]!, bundleSlots[activeBundle]!);
   activeBundle = index;
 }
-const sandbox = createSandboxHostHttpServer();
+const sandbox = createControlUiSandboxFixtureServer((pathname) => fixture.assets.get(pathname));
 await new Promise<void>((resolve, reject) => {
   sandbox.once("error", reject);
   sandbox.listen(sandboxPort ?? 0, "127.0.0.1", resolve);
@@ -430,7 +436,7 @@ const fixture = createControlUiTeamScaleFixture({
   baseUrl: server.baseUrl,
   sandboxUrl: buildSandboxHostPath({
     blockDescendantFrames: true,
-    resourceDomains: values["dashboard-mcp-app"] ? [new URL(server.baseUrl).origin] : undefined,
+    resourceDomains: values["dashboard-mcp-app"] ? [`http://127.0.0.1:${address.port}`] : undefined,
   }),
   sandboxPort: address.port,
   liveRun: values["live-events"] || values["streaming-reply"],
@@ -685,6 +691,15 @@ try {
     await page.locator('[data-navigation-view="online"]').click();
   }
   await settle();
+  if (values["chat-dashboard-route"]) {
+    // Save the operator's dashboard-first layout through its normal action.
+    await page.locator("button.chat-pane__layout-trigger:not([inert] *)").first().click();
+    await page.locator('.chat-pane__layout-menu [data-value="swap"]').click();
+    await page.evaluate(
+      (deepLink) => history.replaceState(null, "", deepLink),
+      controlUiSessionUrl(server.baseUrl, fixture.selectedSessionKey, "chat"),
+    );
+  }
   await page.locator('aside.sidebar[data-snapshot-saved="true"]').waitFor();
   const warmInput: Parameters<typeof persistColdLoadWarmState>[0] = {
     sessionKey: fixture.selectedSessionKey,
@@ -1338,6 +1353,7 @@ try {
         sidebarLiveChurn: fixture.sidebarLiveChurn,
         duplicateBootReads: values["duplicate-boot-reads"],
         dashboardMcpApp: values["dashboard-mcp-app"],
+        chatDashboardRoute: values["chat-dashboard-route"],
         traced: !values.untraced,
         cpuProfile,
         cpuProfileCompare: values["cpu-profile-compare"],

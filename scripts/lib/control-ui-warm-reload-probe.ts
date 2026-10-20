@@ -147,6 +147,8 @@ export function warmReloadProbe() {
             pending.set(frame.id, frame.method);
             if (frame.method === "connect") {
               mark("connectSent");
+            } else if (milestones.hello !== undefined) {
+              mark("firstPostHelloRpc");
             }
           }
         }
