@@ -81,8 +81,11 @@ async function setup() {
   const sessions = createTestSessionCapability(store.gateway);
   assert(store.gateway.snapshot.client);
   const { pane, state } = createTestChatPane({ client: store.gateway.snapshot.client, sessions });
-  pane.context.gateway = store.gateway;
-  pane.context.runtimeConfig = createRuntimeConfigCapability(store.gateway);
+  pane.context = {
+    ...pane.context,
+    gateway: store.gateway,
+    runtimeConfig: createRuntimeConfigCapability(store.gateway),
+  };
   state.loadAssistantIdentity = vi.fn(async () => undefined);
   const stopSessions = sessions.subscribe((next) => pane.applySessionsState(next));
   const stopGateway = store.gateway.subscribe((next) => pane.applyGatewaySnapshot(next));

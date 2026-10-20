@@ -294,7 +294,7 @@ describe("chat pane approval requester identity", () => {
     } satisfies GatewaySessionRow;
     const decideApproval = vi.fn();
     const context: ApplicationContext = {
-      ...createInitializationContext(),
+      ...createInitializationContext(createGatewayBrowserClientFixture()),
       overlays: {
         snapshot: {
           approvalQueue: [],
