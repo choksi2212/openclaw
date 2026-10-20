@@ -1092,6 +1092,13 @@ hit rate on the repaired path, without a material paired latency regression.
 Native Git status used to validate a revision still counts as Git work; cache
 hits do not imply zero subprocesses.
 
+Add `--nested-cwd` to launch each session from the fixture's `new/` subdirectory.
+This exercises checkout discovery through a session's working directory instead
+of supplying the repository root. Compare full diffs under `--churn-ms 1000`
+with and without this option; require identical response hashes, immediate edit
+visibility, and the same cache eligibility as the root-directory case. The
+267,000-file fixture remains a detached linked worktree with a separate Git dir.
+
 For a second scenario with independent revision checks, add
 `--poll-state-dir <other seeded fixture>` on each side. Both isolated Gateways
 then poll both existing synthetic worktrees concurrently, using a separate
