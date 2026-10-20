@@ -130,7 +130,7 @@ describe("physical store diagnostics", () => {
     },
   );
 
-  it("does not report first-use state columns as pending schema migrations", async () => {
+  it("admits retained legacy state without requiring first-use schema migrations", async () => {
     const input = fixture();
     input.family = "state";
     input.descriptor = await loadStatePortDescriptor();
@@ -146,7 +146,18 @@ describe("physical store diagnostics", () => {
       db.prepare(
         "INSERT INTO config_machine_state VALUES ('state.schema.contentVersion', ?, 1)",
       ).run(String(OPENCLAW_STATE_SCHEMA_VERSION));
-      db.exec(`ALTER TABLE agent_database_leases DROP COLUMN provenance;
+      // Published installs retain fleet rows after tenant-container retirement.
+      db.exec(`CREATE TABLE fleet_cells (
+          tenant_id TEXT NOT NULL PRIMARY KEY,
+          created_at_ms INTEGER NOT NULL,
+          image TEXT NOT NULL,
+          runtime TEXT NOT NULL,
+          host_port INTEGER NOT NULL,
+          container_name TEXT NOT NULL,
+          data_dir TEXT NOT NULL
+        ) STRICT;
+        INSERT INTO fleet_cells VALUES
+          ('retired', 17, 'legacy-image', 'docker', 18789, 'legacy-container', '/retired/data');
         ALTER TABLE agent_deletion_journal DROP COLUMN phase;
         INSERT INTO agent_deletion_journal
           (agent_id, agent_dir, workspace_dir, sessions_dir, created_at)
