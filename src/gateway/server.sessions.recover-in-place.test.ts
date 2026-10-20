@@ -124,11 +124,9 @@ async function fixture(
     getCommittedRuntimeConfig: () => config,
     addChatRun: vi.fn(() => {
       runAdded = true;
-      return undefined;
     }),
     removeChatRun: vi.fn(() => {
       runRemoved.resolve();
-      return undefined;
     }),
     trackExecution: async (run) => {
       const execution = Promise.resolve().then(run);
@@ -137,14 +135,13 @@ async function fixture(
     },
   });
   const scope = { agentId: "main", sessionKey: key, sessionId, storePath };
-  const transcript = () => loadTranscriptEvents({ ...scope, sessionId });
+  const transcript = () => loadTranscriptEvents(scope);
   return {
     key,
     sessionId,
     recoveryCycleId,
     storePath,
     scope,
-    owner,
     operator,
     retainedMetadata,
     context,
@@ -202,6 +199,17 @@ async function recover(
   return response;
 }
 
+function expectContinuation(
+  current: Awaited<ReturnType<typeof fixture>>,
+  response: unknown,
+  continuation: Record<string, unknown>,
+) {
+  expect(response, JSON.stringify(response)).toMatchObject({
+    ok: true,
+    payload: { key: current.key, sessionId: current.sessionId, continuation },
+  });
+}
+
 test.for([false, true])(
   "operator resume keeps session identity and admits one durable continuation (native: %s)",
   async (native, { signal }) => {
@@ -244,14 +252,7 @@ test.for([false, true])(
     try {
       const results = await Promise.all([recover(current), recover(current)]);
       const resumed = results.find((result) => result.ok);
-      expect(resumed, JSON.stringify(resumed)).toMatchObject({
-        ok: true,
-        payload: {
-          key: current.key,
-          sessionId: current.sessionId,
-          continuation: { status: "started" },
-        },
-      });
+      expectContinuation(current, resumed, { status: "started" });
       expect(results.filter((result) => !result.ok)).toHaveLength(1);
       await withinTest(dispatched.promise, signal);
       const repeated = await recover(current);
@@ -332,16 +333,9 @@ test.for([undefined, "media", "message", "text"] as const)(
       ).toBe("claude-cli");
       const expectUnchanged = await current.expectUnchangedAfter(before);
       const rejected = await recover(current);
-      expect(rejected, JSON.stringify(rejected)).toMatchObject({
-        ok: true,
-        payload: {
-          key: current.key,
-          sessionId: current.sessionId,
-          continuation: {
-            status: "rejected",
-            error: { details: { reason: "restart-safe-tools-unavailable" } },
-          },
-        },
+      expectContinuation(current, rejected, {
+        status: "rejected",
+        error: { details: { reason: "restart-safe-tools-unavailable" } },
       });
       await expectUnchanged();
     } finally {

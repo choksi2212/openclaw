@@ -65,8 +65,7 @@ type AgentResponse = {
   type: string;
   id: string;
   ok: boolean;
-  payload?: { runId?: string; status?: string };
-  error?: { message?: string };
+  payload?: { status?: string };
 };
 
 installGatewayTestHooks({
@@ -123,10 +122,7 @@ it.for([
     const { provider, baseUrl, api, ...modelDefinition } = model;
     testState.sessionStorePath = path.join(
       process.env.OPENCLAW_STATE_DIR!,
-      "agents",
-      "main",
-      "sessions",
-      "sessions.json",
+      "agents/main/sessions/sessions.json",
     );
     testState.agentConfig = {
       model: { primary: `${model.provider}/${model.id}` },
@@ -181,7 +177,7 @@ it.for([
     const modelStarted = createDeferred();
     const sessionLifecycleState = await import("./session-lifecycle-state.js");
     const startCommitted = createDeferred();
-    // Start persistence is detached from model readiness and can still change sharing facts.
+    // Persistence and model readiness must both settle before inspecting sharing facts.
     void startCommitted.promise.catch(() => undefined);
     const prepareLifecycle = sessionLifecycleState.prepareGatewaySessionLifecycleEvent;
     const lifecycleSpy = vi
@@ -219,9 +215,7 @@ it.for([
       const modelStream = createAssistantMessageEventStream();
       streamMocks.streamSimple
         .mockImplementation(() =>
-          createAssistantResultStream(
-            createAssistant(attempt.model, [{ type: "text", text: "Correction applied." }]),
-          ),
+          createAssistantResultStream(createAssistant(attempt.model, "Correction applied.")),
         )
         .mockImplementationOnce(() => {
           modelStarted.resolve();
@@ -274,7 +268,7 @@ it.for([
         await modelStarted.promise;
         ownerReady.resolve({ attempt, handle: prepared.queueHandle });
         await releaseModel.promise;
-        const assistant = createAssistant(attempt.model, [{ type: "text", text: "Completed." }]);
+        const assistant = createAssistant(attempt.model, "Completed.");
         modelStream.push({ type: "done", reason: "stop", message: assistant });
         modelStream.end();
         await prompt;
@@ -405,13 +399,11 @@ it.for([
       expect(response.ok, JSON.stringify({ response, diagnostics: diagnostics.mock.calls })).toBe(
         true,
       );
-      const captured = capture.mock.results.find(
-        (result) => result.type === "return" && result.value?.runId === runId,
-      );
-      expect(captured?.value).toMatchObject({
-        runId,
-        sourceTurnId: runId,
-      });
+      expect(
+        capture.mock.results.find(
+          (result) => result.type === "return" && result.value?.runId === runId,
+        )?.value,
+      ).toMatchObject({ runId, sourceTurnId: runId });
       expect(
         await withinTest(disposition.promise, signal),
         JSON.stringify(

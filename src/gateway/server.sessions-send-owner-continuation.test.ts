@@ -93,6 +93,11 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
     const child = "agent:main:subagent:owner-proof";
     const parentId = "owner-proof-parent";
     const originalRun = "owner-proof-original";
+    const parentIdentity = { sessionKey: parent, sessionId: parentId };
+    const toolOptions = { agentSessionKey: parent, sessionId: parentId };
+    const wait = <T>(work: PromiseLike<T>) => withinTest(work, signal);
+    const gate = (entered: PromiseLike<unknown>, work: PromiseLike<unknown>, message: string) =>
+      wait(awaitGateBeforeSettlement(entered, work, message));
     const effectPath = path.join(root, "effect.txt");
     testState.sessionStorePath = path.join(root, "sessions.json");
     await writeSessionStore({
@@ -243,13 +248,7 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
       } else {
         const admission = prepareAgentCommandExecutionIdentity({
           opts,
-          prepared: {
-            cfg: getRuntimeConfig(),
-            runId,
-            sessionAgentId: "main",
-            sessionId: parentId,
-            sessionKey: parent,
-          },
+          prepared: { ...parentIdentity, cfg: getRuntimeConfig(), runId, sessionAgentId: "main" },
           ingress: { kind: "gateway-client", boundary: "agent", state: "present" },
           lifecycleGeneration: expectDefined(opts.lifecycleGeneration, "Gateway generation"),
         });
@@ -272,8 +271,7 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
                 resolveOpenClawPluginToolsForOptions({
                   options: {
                     runId,
-                    agentSessionKey: parent,
-                    sessionId: parentId,
+                    ...toolOptions,
                     workspaceDir: root,
                     senderIsOwner: false,
                     pluginToolAllowlist: ["owner_proof"],
@@ -300,28 +298,16 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
       emitAgentEvent({
         runId,
         stream: "lifecycle",
-        data: {
-          phase: "end",
-          startedAt: 1,
-          endedAt: Date.now(),
-          terminalReply,
-        },
+        data: { phase: "end", startedAt: 1, endedAt: Date.now(), terminalReply },
       });
       return {
         payloads: [{ text, mediaUrl: null }],
-        meta: {
-          durationMs: 1,
-          terminalReply,
-        },
+        meta: { durationMs: 1, terminalReply },
       };
     });
     const { operationalRunInstance } = createTestAdmittedRunContext(originalRun);
     const authority = claimAgentRunDelegatedAuthority(operationalRunInstance);
-    registerAgentRunContext(originalRun, {
-      agentId: "main",
-      sessionKey: parent,
-      sessionId: parentId,
-    });
+    registerAgentRunContext(originalRun, { ...parentIdentity, agentId: "main" });
     try {
       try {
         const capability = expectDefined(
@@ -350,8 +336,7 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
               const send = expectDefined(
                 createOpenClawTools({
                   runId: originalRun,
-                  agentSessionKey: parent,
-                  sessionId: parentId,
+                  ...toolOptions,
                   config: { ...config, tools: { sessions: { visibility: "all" } } },
                 }).find((tool) => tool.name === "sessions_send"),
                 "sessions_send tool",
@@ -364,42 +349,28 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
               expect(result.details).toMatchObject({ status: "accepted" });
             }),
         );
-        await withinTest(
-          awaitGateBeforeSettlement(
-            inlineWaitStarted.promise,
-            sent,
-            "Send ended before entering its inline completion wait",
-          ),
-          signal,
-        );
+        await gate(inlineWaitStarted.promise, sent, "Send ended before inline completion wait");
         await vi.advanceTimersByTimeAsync(1_000);
-        await withinTest(sent, signal);
+        await wait(sent);
       } finally {
         releaseAgentRunDelegatedAuthority(authority);
         clearAgentRunContext(originalRun);
         originalClosed = true;
         childMayFinish.resolve();
       }
-      await withinTest(
-        awaitGateBeforeSettlement(
-          requesterAccepted.promise,
-          completionClosed.promise,
-          "Completion ended before private requester admission",
-        ),
-        signal,
+      await gate(
+        requesterAccepted.promise,
+        completionClosed.promise,
+        "Completion ended before requester admission",
       );
       // Cross the native accepted-ack yield without advancing run deadlines.
       await vi.advanceTimersByTimeAsync(10);
-      await withinTest(
-        awaitGateBeforeSettlement(
-          pluginEntered.promise,
-          parentFinished.promise,
-          "Requester ended before its plugin could check owner authority",
-        ),
-        signal,
+      await gate(
+        pluginEntered.promise,
+        parentFinished.promise,
+        "Requester ended before plugin invocation",
       );
-      expect(parentError).toBeUndefined();
-      expect(pluginError).toBeUndefined();
+      expect([parentError, pluginError]).toEqual([undefined, undefined]);
       if (outcome === "owner revoked" || outcome === "owner reassigned") {
         setRuntimeConfigSnapshot({
           ...config,
@@ -409,13 +380,10 @@ it.for(["success", "child error", "owner revoked", "owner reassigned", "new user
         revokeRequesterCronAuthority(parent);
       }
       effectMayFinish.resolve();
-      await withinTest(parentFinished.promise, signal);
-      await withinTest(completionClosed.promise, signal);
+      await wait(parentFinished.promise);
+      await wait(completionClosed.promise);
       expect(parentError).toBeUndefined();
-      expect(requesterReceipt).toMatchObject({
-        status: "ok",
-        inputProcessingCompleted: true,
-      });
+      expect(requesterReceipt).toMatchObject({ status: "ok", inputProcessingCompleted: true });
       if (outcome === "success" || outcome === "child error") {
         expect(pluginError).toBeUndefined();
         expect(fs.readFileSync(effectPath, "utf8")).toBe("authorized effect");

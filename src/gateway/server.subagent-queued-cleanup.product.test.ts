@@ -1,6 +1,7 @@
 // Prove queued subagent Stop cleanup through real model, ingress, and control boundaries.
 import { X509Certificate } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { text } from "node:stream/consumers";
 import { afterEach, expect, it, vi } from "vitest";
 import { startOpenAiResponsesModelServer } from "../../test/helpers/openai-responses-model-fixture.js";
 import {
@@ -41,8 +42,7 @@ const queuedInput = "Queued durable child input";
 let responseSequence = 0;
 
 function toolCallEvents(name: string, args: Record<string, unknown>) {
-  // The local provider emits the same streamed function-call sequence consumed by
-  // the OpenAI Responses adapter. Production runner code then owns tool execution.
+  // Preserve the streamed call sequence; the real runner executes the tools.
   const sequence = ++responseSequence;
   const responseId = `resp_queued_cleanup_${sequence}`;
   const itemId = `fc_queued_cleanup_${sequence}`;
@@ -55,30 +55,26 @@ function toolCallEvents(name: string, args: Record<string, unknown>) {
     name,
     arguments: argumentsText,
   };
+  const response = { id: responseId, object: "response" };
+  const argumentEvent = (type: string, data: Record<string, unknown>) => ({
+    type: `response.function_call_arguments.${type}`,
+    item_id: itemId,
+    output_index: 0,
+    ...data,
+  });
   return [
     {
       type: "response.created",
-      response: { id: responseId, object: "response", status: "in_progress", output: [] },
+      response: { ...response, status: "in_progress", output: [] },
     },
     { type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
-    {
-      type: "response.function_call_arguments.delta",
-      item_id: itemId,
-      output_index: 0,
-      delta: argumentsText,
-    },
-    {
-      type: "response.function_call_arguments.done",
-      item_id: itemId,
-      output_index: 0,
-      arguments: argumentsText,
-    },
+    argumentEvent("delta", { delta: argumentsText }),
+    argumentEvent("done", { arguments: argumentsText }),
     { type: "response.output_item.done", output_index: 0, item },
     {
       type: "response.completed",
       response: {
-        id: responseId,
-        object: "response",
+        ...response,
         status: "completed",
         output: [item],
         usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 },
@@ -88,8 +84,7 @@ function toolCallEvents(name: string, args: Record<string, unknown>) {
 }
 
 function findSpawnReceipt(value: unknown): SpawnReceipt | undefined {
-  // The external model transport sees the sessions_spawn result as nested request
-  // input. Walk that public payload instead of inspecting the in-process registry.
+  // Read the public sessions_spawn result, never the in-process registry.
   if (typeof value === "string") {
     try {
       return findSpawnReceipt(JSON.parse(value) as unknown);
@@ -118,17 +113,8 @@ function findSpawnReceipt(value: unknown): SpawnReceipt | undefined {
   return undefined;
 }
 
-async function readRequestBody(request: IncomingMessage): Promise<string> {
-  let body = "";
-  for await (const chunk of request) {
-    body += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-  }
-  return body;
-}
-
 async function startYieldModelServer(allowYield: Promise<void>) {
-  // Parent requests spawn the child. The child's first request stays open until
-  // ingress has queued a follow-up, then returns a real sessions_yield tool call.
+  // Hold the child until ingress queues a follow-up, then emit sessions_yield.
   const childAccepted = createDeferred<SpawnReceipt>();
   const childModelStarted = createDeferred();
   let yieldSent = false;
@@ -148,13 +134,12 @@ async function startYieldModelServer(allowYield: Promise<void>) {
     },
   });
   async function handleRequest(request: IncomingMessage, response: ServerResponse) {
-    const body = await readRequestBody(request);
+    const body = await text(request);
     const parsed = JSON.parse(body) as unknown;
     if (body.includes(queuedInput)) {
       queuedInputRequests += 1;
     }
-    // A fresh child attempt is the only request carrying the child task without a
-    // prior tool result. Holding it keeps the admitted run available to ingress.
+    // Only the fresh child attempt carries its task without a prior tool result.
     if (body.includes(childTask) && !body.includes("function_call_output")) {
       childModelStarted.resolve();
       await allowYield;
@@ -162,8 +147,7 @@ async function startYieldModelServer(allowYield: Promise<void>) {
       writeOpenAiResponsesSse(response, toolCallEvents("sessions_yield", { waitFor: "message" }));
       return;
     }
-    // The parent uses the production sessions_spawn tool; its next provider request
-    // carries the accepted child key in the function output below.
+    // The parent's next request carries the accepted child key in its tool output.
     if (body.includes(parentPrompt) && !body.includes("function_call_output")) {
       writeOpenAiResponsesSse(
         response,
@@ -260,8 +244,6 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
     });
   await runQaGatewayFixture(
     async () => {
-      // Create the child through chat.send and discover its key only from the model
-      // transport response to sessions_spawn.
       await gateway.server.startupSettled;
       const parentRunId = "subagent-yielded-queued-cleanup-parent";
       await expect(
@@ -276,8 +258,7 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
       childSessionKey = child.childSessionKey;
       await model.childModelStarted;
 
-      // Real channel ingress claims durable custody, then the reply runner defers the
-      // input as a follow-up behind the active child turn.
+      // Keep real ingress custody while the reply runner defers behind the child.
       const queue = createTestIngressQueue(state.stateDir);
       const release = queue.release.bind(queue);
       queue.release = async (...args) => {
@@ -326,15 +307,13 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
       expect(deferredMode).toBe("followup");
       await expect(queue.listClaims()).resolves.toHaveLength(1);
 
-      // sessions_yield settles the operation but deliberately leaves the subagent
-      // task nonterminal, making public Stop responsible for the queued input.
+      // Yield leaves the task nonterminal: public Stop must clean up its queued input.
       allowYield.resolve();
       await childTerminal.promise;
       vi.useFakeTimers({ toFake: ["setTimeout"] });
       stopResponse = postSubagentKill(gateway.port, childSessionKey);
       await releaseStarted.promise;
-      // Durable kill writes can finish after ingress release starts. Advance only
-      // once the real source-cleanup owner has armed its drain deadline.
+      // Advance only after the real source owner arms its cleanup deadline.
       await awaitGateBeforeSettlement(
         sourceDrainStarted.promise,
         stopResponse,
@@ -351,8 +330,7 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
       });
       releaseCleanup.resolve();
       await releaseFinished.promise;
-      // Once cleanup releases custody, repeated Stop observes the same durable
-      // cancellation without killing the run again or dispatching its held queued input.
+      // Repeated Stop observes durable cancellation without dispatching queued input.
       const retry = await postSubagentKill(gateway.port, childSessionKey);
       expect(retry, JSON.stringify(retry)).toEqual({
         status: 200,
@@ -384,17 +362,11 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
       ]);
     },
     () => releaseCleanup.resolve(),
-    async () => {
-      if (stopResponse) {
-        await stopResponse.catch(() => undefined);
-      }
-    },
+    () => stopResponse?.catch(() => undefined),
     () => sourceDrainSpy.mockRestore(),
     () => drain?.dispose(),
     () => disconnectGatewayClient(gateway.client),
-    async () => {
-      await gateway.server.close({ reason: "subagent yielded queued cleanup complete" });
-    },
+    () => gateway.server.close({ reason: "subagent yielded queued cleanup complete" }),
     () => model.close(),
     () => state.cleanup(),
   );

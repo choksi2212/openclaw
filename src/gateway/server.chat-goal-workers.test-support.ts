@@ -39,7 +39,7 @@ import { createWorkerWorkspaceOperationCoordinator } from "./worker-environments
 
 type Scope = { agentId: string; sessionKey: string; sessionId: string; storePath: string };
 
-/** Provider/model transport is simulated; RPC, queue, sharing and SQLite writers are real. */
+/** RPC, queue, sharing and SQLite are real; only provider/node transport is simulated. */
 export function registerWorkerGoalChatCases(
   scope: () => Scope,
   runEmbeddedAgent: MockInstance<typeof executeEmbeddedAgent>,
@@ -136,13 +136,16 @@ export function registerWorkerGoalChatCases(
         sshEndpoint: null,
         attachedSessionIds: [sessionId],
       };
+      const placementOwner = {
+        environmentId: environment.environmentId,
+        ownerEpoch: environment.ownerEpoch,
+      };
       await advancePlacementFixtureToActive(
         placements,
         openOpenClawStateDatabase(),
         { agentId: "main", sessionKey, sessionId, executionMode: "remote-exec" },
         {
-          environmentId: environment.environmentId,
-          ownerEpoch: environment.ownerEpoch,
+          ...placementOwner,
           workerBundleHash: environment.bootstrapReceipt.bundleHash,
           remoteWorkspaceDir: "/worker/goal-workspace",
         },
@@ -150,7 +153,6 @@ export function registerWorkerGoalChatCases(
       const unexpectedTransport = async () => {
         throw new Error("Unexpected external worker operation");
       };
-      // Only node/model I/O is synthetic; the launcher owns real SQLite placement claims.
       const provider = createWorkerSessionTurnPlacementProvider({
         placements,
         environments: {
@@ -160,8 +162,7 @@ export function registerWorkerGoalChatCases(
           destroy: unexpectedTransport,
           stopTunnel: async () => {},
           startTunnel: async () => ({
-            environmentId: environment.environmentId,
-            ownerEpoch: environment.ownerEpoch,
+            ...placementOwner,
             runWorkspaceCommand: async (command) => {
               command.assertCurrent?.();
               expect(JSON.parse(command.input ?? "null")).toEqual({ op: "discover" });
@@ -234,8 +235,11 @@ export function registerWorkerGoalChatCases(
       );
       const prepared = createDeferred();
       const promote = createDeferred();
-      const objective = "Finish a native worker checklist";
-      const request = createGoalChatStartRequest(scope(), objective, randomUUID());
+      const request = createGoalChatStartRequest(
+        scope(),
+        "Finish a native worker checklist",
+        randomUUID(),
+      );
       const profile = ensureProfileForEmail("worker-goal@example.test");
       const operator = {
         ...client,
@@ -251,6 +255,7 @@ export function registerWorkerGoalChatCases(
           isLocalClient: true,
         },
       } satisfies GatewayClient;
+      const send = (input = request) => rpc("chat.send", input, undefined, operator);
       runEmbeddedAgent.mockImplementation(async (params) => {
         prepared.resolve();
         await promote.promise;
@@ -312,7 +317,7 @@ export function registerWorkerGoalChatCases(
           params.preparedRunAdmission?.assertSourceCurrent,
         );
       });
-      const starting = rpc("chat.send", request, undefined, operator);
+      const starting = send();
       try {
         await awaitGateBeforeSettlement(
           prepared.promise,
@@ -321,7 +326,7 @@ export function registerWorkerGoalChatCases(
         );
         expectNoGoalInput();
         if (mode === "continue") {
-          const duplicate = await rpc("chat.send", request, undefined, operator);
+          const duplicate = await send();
           expect(duplicate.mock.calls[0]?.[0]).toBe(false);
           expect(duplicate.mock.calls[0]?.[2]).toMatchObject({
             code: "UNAVAILABLE",
@@ -345,19 +350,14 @@ export function registerWorkerGoalChatCases(
             }
           }
           if (mode === "preparation-failed") {
-            const changed = await rpc(
-              "chat.send",
-              { ...request, message: "A different objective" },
-              undefined,
-              operator,
-            );
+            const changed = await send({ ...request, message: "A different objective" });
             expect(changed.mock.calls[0]?.[0]).toBe(false);
             expect(changed.mock.calls[0]?.[2]).toMatchObject({
               code: "INVALID_REQUEST",
               details: { reason: "goal-operation-conflict" },
             });
             expect(runEmbeddedAgent).toHaveBeenCalledOnce();
-            const retried = await rpc("chat.send", request, undefined, operator);
+            const retried = await send();
             expectAccepted(retried, { status: "started", action: "start" });
             await waitForDispatchEnd();
             expect(loadSessionEntry(scope())?.goal).toMatchObject({
@@ -407,7 +407,7 @@ export function registerWorkerGoalChatCases(
         expect(modelExecuted).toHaveBeenCalledTimes(4);
         expect(userMessages()).toHaveLength(2);
         context.dedupe.clear();
-        const replay = await rpc("chat.send", request, undefined, operator);
+        const replay = await send();
         expect(replay.mock.calls[0]?.[1]).toMatchObject({ replayed: true, goalId: first.id });
         expect(runEmbeddedAgent).toHaveBeenCalledTimes(4);
       } finally {
@@ -425,14 +425,12 @@ export function registerWorkerGoalChatCases(
         if (active?.state === "active") {
           const draining = await placements.startDrain({
             sessionId,
-            environmentId: environment.environmentId,
-            ownerEpoch: environment.ownerEpoch,
+            ...placementOwner,
             expectedGeneration: active.generation,
           });
           const reconciling = await placements.startReconcile({
             sessionId,
-            environmentId: environment.environmentId,
-            ownerEpoch: environment.ownerEpoch,
+            ...placementOwner,
             expectedGeneration: draining.generation,
           });
           const reclaimed = await placements.transition({
