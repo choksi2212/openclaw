@@ -5,8 +5,8 @@ import {
 } from "../../infra/diagnostic-events.js";
 import { createReplyOperation } from "../../sessions/session-controller.js";
 import { captureSessionTarget } from "../../sessions/session-controller.lifecycle.js";
+import { createTestFinalizationContext } from "./agent-runner-result-accounting.persistence.test-support.js";
 import { finalizeReplyAgentRun } from "./agent-runner-result.js";
-import type { FinalizeReplyAgentRunInput } from "./agent-runner-result.types.js";
 import { createMockFollowupRun, createMockTypingController } from "./test-helpers.js";
 import { createTypingSignaler } from "./typing-mode.js";
 
@@ -41,61 +41,28 @@ it("emits usage diagnostics for a deliberate silent reply", async () => {
   replyOperation.setPhase("running");
   const diagnostics: DiagnosticEventPayload[] = [];
   const unsubscribe = onInternalDiagnosticEvent((event) => diagnostics.push(event));
-  const context: FinalizeReplyAgentRunInput = {
-    activeIsNewSession: false,
-    activeSessionEntry: undefined,
-    activeSessionStore: {},
-    blockReplyPipeline: null,
-    blockStreamingEnabled: false,
-    cfg,
-    commandBody: followupRun.prompt,
-    defaultModel: "gpt-5.6-luna",
-    followupRun,
+  const context = createTestFinalizationContext(followupRun, replyOperation);
+  Object.assign(context, {
     isHeartbeat: true,
-    pendingToolTasks: new Set(),
-    preflightCompactionApplied: false,
-    queueKey: sessionKey,
-    replyMediaContext: { normalizePayload: async (payload) => payload },
-    replyOperation,
-    replyRouteThreadId: undefined,
-    replyToChannel: undefined,
-    replyToMode: "off",
-    resolvedBlockStreamingBreak: "message_end",
-    resolvedQueue: { mode: "followup" },
-    resolvedVerboseLevel: "off",
-    returnWithQueuedFollowupDrain: (value) => value,
-    runFollowupTurn: async () => {},
-    execution: {
-      kind: "settled",
-      status: "ok",
-      result: {
-        payloads: [],
-        meta: {
-          durationMs: 1,
-          terminalReply: { disposition: "silent" },
-          agentMeta: {
-            sessionId,
-            provider: "openai",
-            model: "gpt-5.6-luna",
-            usage: { input: 1_200, output: 25, total: 1_225 },
-          },
-        },
-      },
-      resolved: { provider: "openai", model: "gpt-5.6-luna" },
-      fallback: { exhausted: false, attempts: [] },
-      autoCompactionCount: 0,
-    },
     runId: "silent-usage-run",
-    runStartedAt: Date.now(),
-    sessionCtx: {},
-    sessionKey,
-    shouldInjectGroupIntro: false,
-    storePath: undefined,
     typingSignals: createTypingSignaler({
       typing: createMockTypingController(),
       mode: "never",
       isHeartbeat: true,
     }),
+  });
+  context.execution.result = {
+    payloads: [],
+    meta: {
+      durationMs: 1,
+      terminalReply: { disposition: "silent" },
+      agentMeta: {
+        sessionId,
+        provider: "openai",
+        model: "gpt-5.6-luna",
+        usage: { input: 1_200, output: 25, total: 1_225 },
+      },
+    },
   };
 
   try {

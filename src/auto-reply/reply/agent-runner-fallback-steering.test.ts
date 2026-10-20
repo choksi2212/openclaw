@@ -31,6 +31,41 @@ import { createMockTypingController } from "./test-helpers.js";
 
 afterEach(() => vi.restoreAllMocks());
 
+type ReplyParams = Parameters<typeof runReplyAgent>[0];
+
+function steer(run: FollowupRun, key: string, overrides: Partial<ReplyParams>) {
+  return runReplyAgent({
+    commandBody: run.prompt,
+    followupRun: run,
+    queueKey: key,
+    resolvedQueue: { mode: "steer", debounceMs: 0 },
+    shouldSteer: true,
+    shouldFollowup: false,
+    isActive: true,
+    typing: createMockTypingController(),
+    sessionCtx: {},
+    sessionKey: key,
+    defaultModel: "gpt-test",
+    resolvedVerboseLevel: "off",
+    isNewSession: false,
+    blockStreamingEnabled: false,
+    resolvedBlockStreamingBreak: "text_end",
+    shouldInjectGroupIntro: false,
+    typingMode: "never",
+    ...overrides,
+  });
+}
+
+function operator(run: FollowupRun, profileId: string, assertCurrent = () => {}) {
+  return createAdmittedRunOperatorAuthority({
+    profileId,
+    scopes: ["operator.read", "operator.write"],
+    gatewayAccessGrant: null,
+    modelPolicy: prepareOperatorModelPolicy({ cfg: run.run.config, policy: {} }),
+    assertCurrent,
+  });
+}
+
 describe("ordinary steering into automatic model fallback", () => {
   it.each([
     { preparation: "fingerprint-1", revoked: false, aborted: false, replaceBackend: false },
@@ -51,16 +86,10 @@ describe("ordinary steering into automatic model fallback", () => {
       run.run.agentId = "main";
       run.run.sessionKey = key;
       let callerCurrent = true;
-      run.operatorAuthority = createAdmittedRunOperatorAuthority({
-        profileId: "incoming-user",
-        scopes: ["operator.read", "operator.write"],
-        gatewayAccessGrant: null,
-        modelPolicy: prepareOperatorModelPolicy({ cfg: run.run.config, policy: {} }),
-        assertCurrent() {
-          if (!callerCurrent) {
-            throw new Error("incoming caller revoked");
-          }
-        },
+      run.operatorAuthority = operator(run, "incoming-user", () => {
+        if (!callerCurrent) {
+          throw new Error("incoming caller revoked");
+        }
       });
       const operation = createReplyOperation({
         sessionKey: key,
@@ -127,25 +156,9 @@ describe("ordinary steering into automatic model fallback", () => {
       );
       const resultState: ReplyOperationRunState = {};
       const typing = createMockTypingController();
-      const incoming = runReplyAgent({
-        commandBody: run.prompt,
-        followupRun: run,
+      const incoming = steer(run, key, {
         opts: { runId: key, [REPLY_OPERATION_RUN_STATE]: resultState },
-        queueKey: key,
-        resolvedQueue: { mode: "steer", debounceMs: 0 },
-        shouldSteer: true,
-        shouldFollowup: false,
-        isActive: true,
         typing,
-        sessionCtx: {},
-        sessionKey: key,
-        defaultModel: "gpt-test",
-        resolvedVerboseLevel: "off",
-        isNewSession: false,
-        blockStreamingEnabled: false,
-        resolvedBlockStreamingBreak: "text_end",
-        shouldInjectGroupIntro: false,
-        typingMode: "never",
       });
       try {
         await awaitGateBeforeSettlement(entered.promise, incoming, "Preparation was not held");
@@ -221,17 +234,11 @@ describe("ordinary steering into automatic model fallback", () => {
     "hook-route",
     "transport-alias",
   ] as const)("preserves admitted selection and authority: %s", async (scenario) => {
-    const collaborative =
-      scenario === "collaborative-automatic" ||
-      scenario === "collaborative-pinned-selection" ||
-      scenario === "collaborative-locked-selection";
-    const explicitSteer =
-      scenario === "explicit-steer-same-requester" || scenario === "explicit-steer-cross-profile";
+    const collaborative = scenario.startsWith("collaborative-");
+    const explicitSteer = scenario.startsWith("explicit-steer-");
     const crossProfile =
       collaborative ||
-      scenario === "cross-profile" ||
-      scenario === "cross-profile-default" ||
-      scenario === "cross-profile-pending" ||
+      scenario.startsWith("cross-profile") ||
       scenario === "explicit-steer-cross-profile";
     const key = `agent:main:fallback-steering-${scenario}`;
     const run = createQueueTestRun({ prompt: "use the new requirements", messageId: scenario });
@@ -276,20 +283,11 @@ describe("ordinary steering into automatic model fallback", () => {
       sessionId: run.run.sessionId,
       resetTriggered: false,
     });
-    const modelPolicy = prepareOperatorModelPolicy({ cfg: run.run.config, policy: {} });
-    const operator = (profileId: string) =>
-      createAdmittedRunOperatorAuthority({
-        profileId,
-        scopes: ["operator.read", "operator.write"],
-        gatewayAccessGrant: null,
-        modelPolicy,
-        assertCurrent() {},
-      });
     if (explicitSteer || collaborative) {
       run.run.conversationId = "shared-steering-chat";
     }
     if (crossProfile || explicitSteer) {
-      run.operatorAuthority = operator("alice");
+      run.operatorAuthority = operator(run, "alice");
       Object.assign(run.run, {
         senderId: "alice-sender",
         senderName: "Alice",
@@ -391,14 +389,10 @@ describe("ordinary steering into automatic model fallback", () => {
       if (scenario === "new-selection") {
         run.run.provider = "test-provider";
         run.run.model = "test-model";
-      } else if (scenario === "pinned-selection" || scenario === "collaborative-pinned-selection") {
+      } else if (scenario.endsWith("pinned-selection")) {
         run.run.hasSessionModelOverride = true;
         run.run.modelOverrideSource = "user";
-      } else if (
-        scenario === "locked-selection" ||
-        scenario === "collaborative-locked-selection" ||
-        scenario === "cross-profile-pending"
-      ) {
+      } else if (scenario.endsWith("locked-selection") || scenario === "cross-profile-pending") {
         run.run.modelSelectionLocked = true;
       } else if (scenario === "changed-tools") {
         run.toolsAllow = ["read"];
@@ -427,23 +421,15 @@ describe("ordinary steering into automatic model fallback", () => {
         ).toBe(true);
       }
       if (crossProfile) {
-        run.operatorAuthority = operator("bob");
+        run.operatorAuthority = operator(run, "bob");
         Object.assign(run.run, {
           senderId: "bob-sender",
           senderName: "Bob",
           gatewayUiCommandTarget: { connId: "bob-tab", profileId: "bob" },
         });
       }
-      const incoming = runReplyAgent({
-        commandBody: run.prompt,
-        followupRun: run,
+      const incoming = steer(run, key, {
         opts: { runId: scenario, [REPLY_OPERATION_RUN_STATE]: resultState },
-        queueKey: key,
-        resolvedQueue: { mode: "steer", debounceMs: 0 },
-        shouldSteer: true,
-        shouldFollowup: false,
-        isActive: true,
-        typing: createMockTypingController(),
         sessionCtx:
           explicitSteer || collaborative
             ? {
@@ -465,14 +451,6 @@ describe("ordinary steering into automatic model fallback", () => {
                   : {}),
               }
             : {},
-        sessionKey: key,
-        defaultModel: "gpt-test",
-        resolvedVerboseLevel: "off",
-        isNewSession: false,
-        blockStreamingEnabled: false,
-        resolvedBlockStreamingBreak: "text_end",
-        shouldInjectGroupIntro: false,
-        typingMode: "never",
       });
       await incoming;
       expect(resultState.admission).toEqual(

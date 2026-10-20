@@ -73,6 +73,25 @@ function createFixture() {
   });
 }
 
+type Fixture = Awaited<ReturnType<typeof createFixture>>;
+function setTerminalReply(
+  { context }: Fixture,
+  kind: "NO_REPLY" | "empty" | "hook_block",
+  expectation: "required" | "optional",
+  message = "blocked",
+) {
+  context.followupRun.run.terminalReplyExpectation = expectation;
+  context.execution.result.payloads = [];
+  context.execution.result.meta.terminalReply = prepareAgentRunTerminalReply({
+    rawText: kind === "NO_REPLY" ? "NO_REPLY" : "",
+  }).terminalReply;
+  if (kind === "NO_REPLY") {
+    context.execution.result.meta.finalAssistantRawText = "NO_REPLY";
+  } else if (kind === "hook_block") {
+    context.execution.result.meta.error = { kind: "hook_block", message };
+  }
+}
+
 it.each(["before-accounting", "during-payload-preparation"] as const)(
   "consolidates only the model switch present %s",
   async (when) => {
@@ -508,16 +527,7 @@ it.each([
     const fixture = await createFixture();
     fixture.context.followupRun.run.traceAuthorized = true;
     fixture.context.followupRun.run.traceLevelOverride = "raw";
-    fixture.context.followupRun.run.terminalReplyExpectation = expectation;
-    fixture.context.execution.result.payloads = [];
-    fixture.context.execution.result.meta.terminalReply = prepareAgentRunTerminalReply({
-      rawText: kind === "NO_REPLY" ? "NO_REPLY" : "",
-    }).terminalReply;
-    if (kind === "NO_REPLY") {
-      fixture.context.execution.result.meta.finalAssistantRawText = "NO_REPLY";
-    } else if (kind === "hook_block") {
-      fixture.context.execution.result.meta.error = { kind: "hook_block", message: "blocked" };
-    }
+    setTerminalReply(fixture, kind, expectation);
     const delivered = await fixture.deliverQueued();
     if (missing) {
       expect(delivered.filter((payload) => payload.isError && payload.isStatusNotice)).toHaveLength(
@@ -598,22 +608,13 @@ it.each([
   async ({ completion, expectation, missing }) => {
     const fixture = await createFixture();
     const { context } = fixture;
-    context.followupRun.run.terminalReplyExpectation = expectation;
+    setTerminalReply(fixture, completion, expectation, "Reply suppressed");
     const onAgentRunTerminalOutcome = vi.fn();
     context.opts = { onAgentRunTerminalOutcome };
     context.execution.resolved = { provider: "fallback-provider", model: "fallback-model" };
     context.execution.fallback.attempts = [
       { provider: diagnostic.provider, model: diagnostic.model, reason: "auth", error: "No login" },
     ];
-    context.execution.result.payloads = [];
-    context.execution.result.meta.terminalReply = prepareAgentRunTerminalReply({
-      rawText: completion === "NO_REPLY" ? "NO_REPLY" : "",
-    }).terminalReply;
-    if (completion === "NO_REPLY") {
-      context.execution.result.meta.finalAssistantRawText = "NO_REPLY";
-    } else if (completion === "hook_block") {
-      context.execution.result.meta.error = { kind: "hook_block", message: "Reply suppressed" };
-    }
 
     const result = await finalizeReplyAgentRun(context);
     context.replyOperation.complete();
@@ -639,48 +640,45 @@ it.each([
 );
 
 describe("cancelled followup compaction accounting", () => {
-  it.each(["restart"] as const)(
-    "retains committed compaction facts after %s abort without success bookkeeping",
-    async (reason) => {
-      const fixture = await createFixture();
-      const original = {
-        ...fixture.context.activeSessionEntry!,
-        compactionCount: 3,
-        groupActivationNeedsSystemIntro: true,
-        inputTokens: 120,
-        outputTokens: 8,
-        cacheRead: 20,
-        cacheWrite: 4,
-      };
-      await fixture.replace(original);
-      Object.assign(fixture.context.activeSessionEntry!, original);
+  it("retains committed compaction facts after restart abort without success bookkeeping", async () => {
+    const fixture = await createFixture();
+    const original = {
+      ...fixture.context.activeSessionEntry!,
+      compactionCount: 3,
+      groupActivationNeedsSystemIntro: true,
+      inputTokens: 120,
+      outputTokens: 8,
+      cacheRead: 20,
+      cacheWrite: 4,
+    };
+    await fixture.replace(original);
+    Object.assign(fixture.context.activeSessionEntry!, original);
 
-      expect(await fixture.accountAborted(reason)).toBeUndefined();
+    expect(await fixture.accountAborted("restart")).toBeUndefined();
 
-      expect(fixture.read()).toMatchObject({
-        sessionId: fixture.sessionId,
-        lifecycleRevision: "generation-1",
-        compactionCount: 4,
-        totalTokens: 40,
-        totalTokensFresh: true,
-        groupActivationNeedsSystemIntro: true,
-        modelProvider: diagnostic.provider,
-        model: diagnostic.model,
-      });
-      // Cancellation preserves committed compaction, not the previous run snapshot.
-      for (const entry of [
-        fixture.read(),
-        fixture.context.activeSessionStore?.[fixture.context.sessionKey!],
-      ]) {
-        expect(entry?.inputTokens).toBeUndefined();
-        expect(entry?.outputTokens).toBeUndefined();
-        expect(entry?.cacheRead).toBeUndefined();
-        expect(entry?.cacheWrite).toBeUndefined();
-        expect(entry?.estimatedCostUsd).toBeUndefined();
-      }
-      expect(fixture.read()?.pendingFinalDelivery).toBeUndefined();
-    },
-  );
+    expect(fixture.read()).toMatchObject({
+      sessionId: fixture.sessionId,
+      lifecycleRevision: "generation-1",
+      compactionCount: 4,
+      totalTokens: 40,
+      totalTokensFresh: true,
+      groupActivationNeedsSystemIntro: true,
+      modelProvider: diagnostic.provider,
+      model: diagnostic.model,
+    });
+    // Cancellation preserves committed compaction, not the previous run snapshot.
+    for (const entry of [
+      fixture.read(),
+      fixture.context.activeSessionStore?.[fixture.context.sessionKey!],
+    ]) {
+      expect(entry?.inputTokens).toBeUndefined();
+      expect(entry?.outputTokens).toBeUndefined();
+      expect(entry?.cacheRead).toBeUndefined();
+      expect(entry?.cacheWrite).toBeUndefined();
+      expect(entry?.estimatedCostUsd).toBeUndefined();
+    }
+    expect(fixture.read()?.pendingFinalDelivery).toBeUndefined();
+  });
 
   it("accounts cancellation against the committed successor despite a predecessor cache", async () => {
     const fixture = await createFixture();
@@ -788,30 +786,20 @@ describe("followup context-pressure accounting", () => {
     });
   });
 
-  it.each([
-    { name: "new diagnostic with usage", withUsage: true, contextBudgetStatus: diagnostic },
-  ])(
-    "persists $name without changing token/cost accounting",
-    async ({ withUsage, contextBudgetStatus }) => {
-      const fixture = await createFixture();
-      const usage = withUsage ? { input: 120, output: 8, cacheRead: 20 } : undefined;
-      const meta = { usage, lastCallUsage: usage, contextBudgetStatus };
-      await fixture.account(lane, meta);
-      expect(fixture.read()?.contextBudgetStatus).toEqual(contextBudgetStatus);
-      expect(fixture.read()).toMatchObject(
-        withUsage
-          ? {
-              inputTokens: 120,
-              outputTokens: 8,
-              cacheRead: 20,
-              totalTokens: 140,
-              totalTokensFresh: true,
-              estimatedCostUsd: 0.000146,
-            }
-          : { totalTokensFresh: false, estimatedCostUsd: 2 },
-      );
-    },
-  );
+  it("persists new diagnostic with usage without changing token/cost accounting", async () => {
+    const fixture = await createFixture();
+    const usage = { input: 120, output: 8, cacheRead: 20 };
+    await fixture.account(lane, { usage, lastCallUsage: usage, contextBudgetStatus: diagnostic });
+    expect(fixture.read()?.contextBudgetStatus).toEqual(diagnostic);
+    expect(fixture.read()).toMatchObject({
+      inputTokens: 120,
+      outputTokens: 8,
+      cacheRead: 20,
+      totalTokens: 140,
+      totalTokensFresh: true,
+      estimatedCostUsd: 0.000146,
+    });
+  });
 
   it("preserves diagnostics for exhausted fallback with usage", async () => {
     const fixture = await createFixture();
@@ -854,28 +842,25 @@ describe("followup context-pressure accounting", () => {
   );
 });
 
-it.each([{ name: "unavailable", contextBudgetStatus: undefined }])(
-  "records a $name diagnostic after preflight compaction without usage",
-  async ({ contextBudgetStatus }) => {
-    const fixture = await createFixture();
-    await incrementCompactionCount({
-      sessionEntry: fixture.context.activeSessionEntry,
-      sessionStore: fixture.context.activeSessionStore,
-      sessionKey: fixture.context.sessionKey,
-      storePath: fixture.context.storePath,
-      amount: 1,
-      tokensAfter: 40,
-    });
-    expect(fixture.read()?.contextBudgetStatus).toBeUndefined();
-    fixture.context.preflightCompactionApplied = true;
-    await fixture.account("ordinary", { contextBudgetStatus });
-    expect(fixture.read()?.contextBudgetStatus).toEqual(contextBudgetStatus);
-    expect(fixture.read()).toMatchObject({
-      totalTokens: 40,
-      totalTokensFresh: true,
-      compactionCount: 1,
-    });
-  },
-);
+it("records an unavailable diagnostic after preflight compaction without usage", async () => {
+  const fixture = await createFixture();
+  await incrementCompactionCount({
+    sessionEntry: fixture.context.activeSessionEntry,
+    sessionStore: fixture.context.activeSessionStore,
+    sessionKey: fixture.context.sessionKey,
+    storePath: fixture.context.storePath,
+    amount: 1,
+    tokensAfter: 40,
+  });
+  expect(fixture.read()?.contextBudgetStatus).toBeUndefined();
+  fixture.context.preflightCompactionApplied = true;
+  await fixture.account("ordinary", { contextBudgetStatus: undefined });
+  expect(fixture.read()?.contextBudgetStatus).toBeUndefined();
+  expect(fixture.read()).toMatchObject({
+    totalTokens: 40,
+    totalTokensFresh: true,
+    compactionCount: 1,
+  });
+});
 
 registerAccountingReplacementRaceCases(createFixture);

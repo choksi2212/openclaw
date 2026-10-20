@@ -46,11 +46,7 @@ beforeEach(() => {
 });
 afterEach(() => clearMemoryPluginState());
 
-function runAccounting(
-  kind: "memory" | "compaction",
-  signal?: AbortSignal,
-  assertCurrent?: () => void,
-) {
+function runAccounting(kind: "memory" | "compaction", assertCurrent?: () => void) {
   const followupRun = createTestFollowupRun();
   if (assertCurrent) {
     followupRun.operatorAuthority = createAdmittedRunOperatorAuthority({
@@ -81,7 +77,6 @@ function runAccounting(
     sessionKey: "main",
     storePath: path.join(followupRun.run.workspaceDir, "sessions.json"),
     isHeartbeat: false,
-    abortSignal: signal,
     cfg: withTestModelContextTokens({
       cfg: {
         agents: { defaults: { compaction: { maxActiveTranscriptBytes: 1000, memoryFlush: {} } } },
@@ -113,25 +108,23 @@ it.each(["memory", "compaction"] as const)(
         usage: { promptTokens: 90000, outputTokens: 7, trailingMessages: [] },
       };
     });
-    const pending = runAccounting(kind, undefined, () => {
+    const pending = runAccounting(kind, () => {
       if (!current) {
         throw new Error("authority retired during accounting");
       }
     });
     try {
       await awaitGateBeforeSettlement(entered.promise, pending, "accounting was not awaited");
-      expect(compact).not.toHaveBeenCalled();
-      expect(flush).not.toHaveBeenCalled();
-      expect(runEntry).not.toHaveBeenCalled();
+      for (const effect of [compact, flush, runEntry]) {
+        expect(effect).not.toHaveBeenCalled();
+      }
       current = false;
       const rejected = expect(pending).rejects.toThrow("authority retired during accounting");
       release.resolve();
       await rejected;
-      expect(increment).not.toHaveBeenCalled();
-      expect(persist).not.toHaveBeenCalled();
-      expect(compact).not.toHaveBeenCalled();
-      expect(flush).not.toHaveBeenCalled();
-      expect(runEntry).not.toHaveBeenCalled();
+      for (const effect of [increment, persist, compact, flush, runEntry]) {
+        expect(effect).not.toHaveBeenCalled();
+      }
     } finally {
       release.resolve();
       await Promise.allSettled([pending]);

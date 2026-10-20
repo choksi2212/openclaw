@@ -49,6 +49,63 @@ const diagnostic = {
 
 export { diagnostic as agentAccountingPersistenceDiagnostic };
 
+export function createTestFinalizationContext(
+  followupRun: FinalizeReplyAgentRunInput["followupRun"],
+  replyOperation: ReplyOperation,
+): FinalizeReplyAgentRunInput {
+  const { config: cfg, model, provider, sessionKey } = followupRun.run;
+  return {
+    activeIsNewSession: false,
+    activeSessionEntry: undefined,
+    activeSessionStore: {},
+    blockReplyPipeline: null,
+    blockStreamingEnabled: false,
+    cfg,
+    commandBody: followupRun.prompt,
+    defaultModel: model,
+    followupRun,
+    isHeartbeat: false,
+    pendingToolTasks: new Set(),
+    preflightCompactionApplied: false,
+    queueKey: sessionKey ?? "test",
+    replyMediaContext: { normalizePayload: async (payload) => payload },
+    replyOperation,
+    replyRouteThreadId: undefined,
+    replyToChannel: undefined,
+    replyToMode: "off",
+    resolvedBlockStreamingBreak: "message_end",
+    resolvedQueue: { mode: "followup" },
+    resolvedVerboseLevel: "off",
+    returnWithQueuedFollowupDrain: (value) => value,
+    runFollowupTurn: async () => {},
+    execution: {
+      kind: "settled",
+      status: "ok",
+      result: {
+        payloads: [{ text: "done" }],
+        meta: {
+          durationMs: 1,
+          requestShaping: { authMode: "api-key", fallbackEligible: false },
+        },
+      },
+      resolved: { provider, model },
+      fallback: { exhausted: false, attempts: [] },
+      autoCompactionCount: 0,
+    },
+    runId: "test-run",
+    runStartedAt: Date.now(),
+    sessionCtx: {},
+    sessionKey,
+    shouldInjectGroupIntro: false,
+    storePath: undefined,
+    typingSignals: createTypingSignaler({
+      typing: createMockTypingController(),
+      mode: "never",
+      isHeartbeat: false,
+    }),
+  };
+}
+
 export async function createAgentAccountingPersistenceFixture({
   storePath,
   root,
@@ -120,57 +177,11 @@ export async function createAgentAccountingPersistenceFixture({
   replyOperation.setPhase("running");
   registerOperation(replyOperation);
   const context: FinalizeReplyAgentRunInput & { storePath: string } = {
-    activeIsNewSession: false,
+    ...createTestFinalizationContext(followupRun, replyOperation),
     activeSessionEntry: entry,
     activeSessionStore: sessionStore,
-    blockReplyPipeline: null,
-    blockStreamingEnabled: false,
-    cfg,
-    commandBody: followupRun.prompt,
-    defaultModel: diagnostic.model,
-    followupRun,
-    isHeartbeat: false,
-    pendingToolTasks: new Set(),
-    preflightCompactionApplied: false,
-    queueKey: sessionKey,
-    replyMediaContext: { normalizePayload: async (payload) => payload },
-    replyOperation,
-    replyRouteThreadId: undefined,
-    replyToChannel: undefined,
-    replyToMode: "off",
-    resolvedBlockStreamingBreak: "message_end",
-    resolvedQueue: { mode: "followup" },
-    resolvedVerboseLevel: "off",
-    returnWithQueuedFollowupDrain: (value) => value,
-    runFollowupTurn: async () => {},
-    execution: {
-      kind: "settled",
-      status: "ok",
-      result: {
-        payloads: [{ text: "done" }],
-        meta: {
-          durationMs: 1,
-          requestShaping: { authMode: "api-key", fallbackEligible: false },
-        },
-      },
-      resolved: {
-        provider: diagnostic.provider,
-        model: diagnostic.model,
-      },
-      fallback: { exhausted: false, attempts: [] },
-      autoCompactionCount: 0,
-    },
     runId,
-    runStartedAt: Date.now(),
-    sessionCtx: {},
-    sessionKey,
-    shouldInjectGroupIntro: false,
     storePath,
-    typingSignals: createTypingSignaler({
-      typing: createMockTypingController(),
-      mode: "never",
-      isHeartbeat: false,
-    }),
   };
   const handle = createReplySessionEntryHandle({
     sessionEntry: entry,

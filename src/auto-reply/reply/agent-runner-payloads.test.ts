@@ -57,6 +57,15 @@ function buildTestReplyPayloads(overrides: TestReplyPayloadParams) {
   return buildReplyPayloads({ ...baseParams, ...overrides });
 }
 
+async function expectBuiltPayloads({
+  expected,
+  ...params
+}: TestReplyPayloadParams & { expected: Record<string, unknown>[] }) {
+  const { replyPayloads } = await buildTestReplyPayloads(params);
+  expect(replyPayloads).toHaveLength(expected.length);
+  expected.forEach((payload, index) => expectFields(replyPayloads[index], payload));
+}
+
 describe("heartbeat reply scratch", () => {
   it.each([
     { notify: false, proposals: ["  PRIVATE_SCRATCH\n\n- keep exact spacing  \n"] },
@@ -111,32 +120,76 @@ describe("heartbeat reply scratch", () => {
   );
 });
 
-type ResolveReplyTransportParams = Parameters<
-  NonNullable<ChannelThreadingAdapter["resolveReplyTransport"]>
->[0];
-
 function expectFields(value: unknown, expected: Record<string, unknown>): void {
   if (!value || typeof value !== "object") {
     throw new Error("expected fields object");
   }
-  const record = value as Record<string, unknown>;
+  const payload = value as Record<string, unknown>;
   for (const [key, expectedValue] of Object.entries(expected)) {
-    expect(record[key], key).toEqual(expectedValue);
+    expect(payload[key], key).toEqual(expectedValue);
   }
 }
 
+function withMirror(text: string, visibleText = text) {
+  return setReplyPayloadMetadata(
+    { text: visibleText },
+    { sourceReplyTranscriptMirror: { sessionKey: "agent:main", text } },
+  );
+}
+
+function expectMirroredText(payload: ReplyPayload | undefined, text: string) {
+  expect(payload?.text).toBe(text);
+  expect(
+    getReplyPayloadMetadata(expectDefined(payload, "expected reply"))?.sourceReplyTranscriptMirror
+      ?.text,
+  ).toBe(text);
+}
+
+function indexedReply(index: number, payload: ReplyPayload) {
+  return setReplyPayloadMetadata(payload, { assistantMessageIndex: index });
+}
+
+function makePipeline(
+  overrides: Partial<NonNullable<TestReplyPayloadParams["blockReplyPipeline"]>> = {},
+) {
+  return {
+    didStream: () => false,
+    isAborted: () => false,
+    hasSentPayload: () => false,
+    enqueue: () => {},
+    flush: async () => {},
+    stop: () => {},
+    hasBuffered: () => false,
+    hasRetryBlockedDelivery: () => false,
+    getSentMediaUrls: (): string[] => [],
+    ...overrides,
+  };
+}
+
+function channelPlugin(
+  id: string,
+  resolveReplyTransport?: ChannelThreadingAdapter["resolveReplyTransport"],
+) {
+  return {
+    pluginId: id,
+    source: "test" as const,
+    plugin: {
+      ...createChannelTestPluginBase({ id }),
+      ...(resolveReplyTransport ? { threading: { resolveReplyTransport } } : {}),
+    },
+  };
+}
+
 async function expectSameTargetRepliesDelivered(params: { provider: string; to: string }) {
-  const { replyPayloads } = await buildTestReplyPayloads({
+  await expectBuiltPayloads({
     payloads: [{ text: "hello world!" }],
     messageProvider: "heartbeat",
     originatingChannel: "feishu",
     originatingTo: "ou_abc123",
     messagingToolSentTexts: ["different message"],
     messagingToolSentTargets: [{ tool: "message", provider: params.provider, to: params.to }],
+    expected: [{ text: "hello world!" }],
   });
-
-  expect(replyPayloads).toHaveLength(1);
-  expect(replyPayloads[0]?.text).toBe("hello world!");
 }
 
 describe("buildReplyPayloads media filter integration", () => {
@@ -144,72 +197,34 @@ describe("buildReplyPayloads media filter integration", () => {
     resetPluginRuntimeStateForTest();
     setActivePluginRegistry(
       createTestRegistry([
-        {
-          pluginId: "slack",
-          plugin: {
-            ...createChannelTestPluginBase({ id: "slack" }),
-            threading: {
-              resolveReplyTransport: ({
-                threadId,
-                replyToId,
-                replyToIsExplicit,
-                replyDelivery,
-              }: ResolveReplyTransportParams) => {
-                const allowedReply = replyDelivery?.replyToMode === "off" ? undefined : replyToId;
-                // Slack uses the known root for inherited replies, but explicit targets win.
-                const resolved =
-                  replyToIsExplicit === false
-                    ? (threadId ?? allowedReply)
-                    : (allowedReply ?? threadId);
-                return {
-                  replyToId: resolved == null ? undefined : String(resolved),
-                  threadId: null,
-                };
-              },
-            },
-          },
-          source: "test",
-        },
-        {
-          pluginId: "mattermost",
-          plugin: {
-            ...createChannelTestPluginBase({ id: "mattermost" }),
-            threading: {
-              resolveReplyTransport: ({
-                threadId,
-                replyToId,
-                replyToIsExplicit,
-                replyDelivery,
-              }: ResolveReplyTransportParams) => {
-                const ambientThreadId = threadId != null ? String(threadId) : undefined;
-                const isFlatDirect =
-                  replyDelivery?.chatType === "direct" && replyDelivery.replyToMode === "off";
-                const resolvedThreadId = isFlatDirect
-                  ? undefined
-                  : replyDelivery
-                    ? replyToIsExplicit
-                      ? (replyToId ?? ambientThreadId)
-                      : (ambientThreadId ?? replyToId ?? undefined)
-                    : (ambientThreadId ?? replyToId);
-                return {
-                  replyToId: isFlatDirect ? null : resolvedThreadId,
-                  threadId: resolvedThreadId ?? null,
-                };
-              },
-            },
-          },
-          source: "test",
-        },
-        {
-          pluginId: "telegram",
-          plugin: createChannelTestPluginBase({ id: "telegram" }),
-          source: "test",
-        },
-        {
-          pluginId: "discord",
-          plugin: createChannelTestPluginBase({ id: "discord" }),
-          source: "test",
-        },
+        channelPlugin("slack", ({ threadId, replyToId, replyToIsExplicit, replyDelivery }) => {
+          const allowedReply = replyDelivery?.replyToMode === "off" ? undefined : replyToId;
+          // Slack uses the known root for inherited replies, but explicit targets win.
+          const resolved =
+            replyToIsExplicit === false ? (threadId ?? allowedReply) : (allowedReply ?? threadId);
+          return {
+            replyToId: resolved == null ? undefined : String(resolved),
+            threadId: null,
+          };
+        }),
+        channelPlugin("mattermost", ({ threadId, replyToId, replyToIsExplicit, replyDelivery }) => {
+          const ambientThreadId = threadId != null ? String(threadId) : undefined;
+          const isFlatDirect =
+            replyDelivery?.chatType === "direct" && replyDelivery.replyToMode === "off";
+          const resolvedThreadId = isFlatDirect
+            ? undefined
+            : replyDelivery
+              ? replyToIsExplicit
+                ? (replyToId ?? ambientThreadId)
+                : (ambientThreadId ?? replyToId ?? undefined)
+              : (ambientThreadId ?? replyToId);
+          return {
+            replyToId: isFlatDirect ? null : resolvedThreadId,
+            threadId: resolvedThreadId ?? null,
+          };
+        }),
+        channelPlugin("telegram"),
+        channelPlugin("discord"),
         {
           pluginId: "feishu-plugin",
           source: "test",
@@ -263,12 +278,9 @@ describe("buildReplyPayloads media filter integration", () => {
       messagingToolSentTexts: ["already sent"],
       messagingToolSentMediaUrls: testCase.sentMediaUrls,
     });
-
     const expected = testCase.expected ?? [testCase.payload];
     expect(replyPayloads).toHaveLength(expected.length);
-    for (const [index, payload] of expected.entries()) {
-      expect(replyPayloads[index]).toMatchObject(payload);
-    }
+    expected.forEach((payload, index) => expect(replyPayloads[index]).toMatchObject(payload));
   });
 
   it("shares first-reply threading across staged payload builds", async () => {
@@ -294,7 +306,7 @@ describe("buildReplyPayloads media filter integration", () => {
   });
 
   it("strips legacy bracket tool blocks from heartbeat replies", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       isHeartbeat: true,
       payloads: [
         {
@@ -306,10 +318,8 @@ describe("buildReplyPayloads media filter integration", () => {
           ].join("\n"),
         },
       ],
+      expected: [{ text: "Before\n\n\nAfter" }],
     });
-
-    expect(replyPayloads).toHaveLength(1);
-    expect(replyPayloads[0]?.text).toBe("Before\n\n\nAfter");
   });
 
   it("preserves internal delivery metadata through final payload normalization", async () => {
@@ -371,15 +381,7 @@ describe("buildReplyPayloads media filter integration", () => {
         "</function_response>",
         "Done",
       ].join("\n");
-      const payload = setReplyPayloadMetadata(
-        { text: visibleAlreadyClean ? "Visible\n\nDone" : text },
-        {
-          sourceReplyTranscriptMirror: {
-            sessionKey: "agent:main",
-            text,
-          },
-        },
-      );
+      const payload = withMirror(text, visibleAlreadyClean ? "Visible\n\nDone" : text);
 
       const { replyPayloads } = await buildTestReplyPayloads({
         isHeartbeat,
@@ -387,11 +389,7 @@ describe("buildReplyPayloads media filter integration", () => {
       });
 
       expect(replyPayloads).toHaveLength(1);
-      expect(replyPayloads[0]?.text).toBe("Visible\n\nDone");
-      expect(
-        getReplyPayloadMetadata(expectDefined(replyPayloads[0], "replyPayloads[0] test invariant"))
-          ?.sourceReplyTranscriptMirror?.text,
-      ).toBe("Visible\n\nDone");
+      expectMirroredText(replyPayloads[0], "Visible\n\nDone");
     },
   );
 
@@ -405,25 +403,18 @@ describe("buildReplyPayloads media filter integration", () => {
       "private inbound paragraph",
     ].join("\n");
     const text = `${conversationContext}\n\nVisible answer.`;
-    const payload = setReplyPayloadMetadata(
-      { text },
-      { sourceReplyTranscriptMirror: { sessionKey: "agent:main", text } },
-    );
+    const payload = withMirror(text);
 
     const { replyPayloads } = await buildTestReplyPayloads({
       payloads: [payload],
       conversationContext,
     });
 
-    expect(replyPayloads[0]?.text).toBe("Visible answer.");
-    expect(
-      getReplyPayloadMetadata(expectDefined(replyPayloads[0], "expected prepared reply payload"))
-        ?.sourceReplyTranscriptMirror?.text,
-    ).toBe("Visible answer.");
+    expectMirroredText(replyPayloads[0], "Visible answer.");
   });
 
   it("dedupes final media only against message-tool media sent to the same route", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       payloads: [{ text: "photo", mediaUrl: "file:///tmp/discord-photo.jpg" }],
       messageProvider: "slack",
       originatingTo: "channel:C1",
@@ -442,10 +433,8 @@ describe("buildReplyPayloads media filter integration", () => {
           mediaUrls: ["file:///tmp/discord-photo.jpg"],
         },
       ],
+      expected: [{ mediaUrl: "file:///tmp/discord-photo.jpg" }],
     });
-
-    expect(replyPayloads).toHaveLength(1);
-    expect(replyPayloads[0]?.mediaUrl).toBe("file:///tmp/discord-photo.jpg");
   });
 
   it("delivers distinct same-target replies when message tool target provider is generic", async () => {
@@ -519,30 +508,22 @@ describe("buildReplyPayloads media filter integration", () => {
         mediaUrls: payload.mediaUrls?.map((value) => rewrite(value) ?? value),
       };
     };
-    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
-      didStream: () => false,
-      isAborted: () => false,
-      hasSentPayload: () => false,
-      enqueue: () => {},
-      flush: async () => {},
-      stop: () => {},
-      hasBuffered: () => false,
-      hasRetryBlockedDelivery: () => false,
+    const pipeline = makePipeline({
       getSentMediaUrls: () => ["file:///tmp/voice.ogg"],
-    };
+    });
 
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       blockStreamingEnabled: true,
       blockReplyPipeline: pipeline,
       normalizeMediaPaths,
       payloads: [{ text: "caption", mediaUrl: "file:///tmp/voice.ogg" }],
-    });
-
-    expect(replyPayloads).toHaveLength(1);
-    expectFields(replyPayloads[0], {
-      text: "caption",
-      mediaUrl: undefined,
-      mediaUrls: undefined,
+      expected: [
+        {
+          text: "caption",
+          mediaUrl: undefined,
+          mediaUrls: undefined,
+        },
+      ],
     });
   });
 
@@ -551,9 +532,7 @@ describe("buildReplyPayloads media filter integration", () => {
       text: "caption",
       mediaList: ["file:///tmp/outbound/voice.ogg"],
     });
-    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
-      didStream: () => false,
-      isAborted: () => false,
+    const pipeline = makePipeline({
       hasSentPayload: (payload) =>
         JSON.stringify({
           text: (payload.text ?? "").trim(),
@@ -562,79 +541,45 @@ describe("buildReplyPayloads media filter integration", () => {
             ...(payload.mediaUrls ?? []),
           ],
         }) === sentKey,
-      enqueue: () => {},
-      flush: async () => {},
-      stop: () => {},
-      hasBuffered: () => false,
-      hasRetryBlockedDelivery: () => false,
       getSentMediaUrls: () => ["file:///tmp/outbound/voice.ogg"],
-    };
+    });
 
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       blockStreamingEnabled: true,
       blockReplyPipeline: pipeline,
       normalizeMediaPaths: async (payload) => payload,
       payloads: [{ text: "caption", mediaUrl: "file:///tmp/outbound/voice.ogg" }],
+      expected: [],
     });
-
-    expect(replyPayloads).toHaveLength(0);
   });
 
   it("preserves unsent text-only final payloads after block pipeline streamed partial content", async () => {
-    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
-      didStream: () => true,
-      isAborted: () => false,
-      hasSentPayload: () => false,
-      enqueue: () => {},
-      flush: async () => {},
-      stop: () => {},
-      hasBuffered: () => false,
-      hasRetryBlockedDelivery: () => false,
-      getSentMediaUrls: () => [],
-    };
-    // The pipeline streamed some partial content, but the final text payload was
-    // never sent (hasSentPayload returns false). The old bug dropped all text-only
-    // finals unconditionally; the fix preserves unsent finals.
-    const { replyPayloads } = await buildTestReplyPayloads({
+    const pipeline = makePipeline({ didStream: () => true });
+    await expectBuiltPayloads({
       blockStreamingEnabled: true,
       blockReplyPipeline: pipeline,
       replyToMode: "all",
       payloads: [{ text: "response", replyToId: "post-123" }],
+      expected: [{ text: "response" }],
     });
-
-    expect(replyPayloads).toHaveLength(1);
-    expect(replyPayloads[0]?.text).toBe("response");
   });
 
   it("preserves final rich content when only its text was streamed", async () => {
-    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+    const pipeline = makePipeline({
       didStream: () => true,
-      isAborted: () => false,
       hasSentPayload: () => true,
       hasSentExactPayload: () => false,
-      enqueue: () => {},
-      flush: async () => {},
-      stop: () => {},
-      hasBuffered: () => false,
-      hasRetryBlockedDelivery: () => false,
-      getSentMediaUrls: () => [],
-    };
+    });
     const presentation = {
       blocks: [{ type: "buttons" as const, buttons: [{ label: "Open", value: "open" }] }],
     };
 
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       blockStreamingEnabled: true,
       blockReplyPipeline: pipeline,
       payloads: [{ text: "response", presentation }],
+      expected: [{ text: "response", presentation }],
     });
-
-    expect(replyPayloads).toEqual([
-      expect.objectContaining({
-        text: "response",
-        presentation,
-      }),
-    ]);
   });
 
   it("drops final caption and media already sent as one coalesced block payload", async () => {
@@ -653,134 +598,88 @@ describe("buildReplyPayloads media filter integration", () => {
     pipeline.enqueue({ mediaUrls: ["file:///photo.png"] });
     await pipeline.flush({ force: true });
 
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       blockStreamingEnabled: true,
       blockReplyPipeline: pipeline,
       payloads: [{ text: "Preview below", mediaUrls: ["file:///photo.png"] }],
+      expected: [],
     });
-
-    expect(replyPayloads).toHaveLength(0);
   });
 
   it("preserves post-stream error payloads when block pipeline streamed successfully", async () => {
-    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
-      didStream: () => true,
-      isAborted: () => false,
-      hasSentPayload: () => false,
-      enqueue: () => {},
-      flush: async () => {},
-      stop: () => {},
-      hasBuffered: () => false,
-      hasRetryBlockedDelivery: () => false,
-      getSentMediaUrls: () => [],
-    };
+    const pipeline = makePipeline({ didStream: () => true });
 
-    const { replyPayloads } = await buildTestReplyPayloads({
+    const text = "Agent couldn't generate a response. Please try again.";
+    await expectBuiltPayloads({
       blockStreamingEnabled: true,
       blockReplyPipeline: pipeline,
       replyToMode: "all",
-      payloads: [{ text: "Agent couldn't generate a response. Please try again.", isError: true }],
-    });
-
-    expect(replyPayloads).toHaveLength(1);
-    expectFields(replyPayloads[0], {
-      text: "Agent couldn't generate a response. Please try again.",
-      isError: true,
+      payloads: [{ text, isError: true }],
+      expected: [{ text, isError: true }],
     });
   });
 
   it("keeps error payloads during silent turns", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    const text =
+      "⚠️ write failed: Memory flush writes are restricted to memory/2026-05-05.md; use that path only.";
+    await expectBuiltPayloads({
       silentExpected: true,
-      payloads: [
-        { text: "normal maintenance reply" },
-        {
-          text: "⚠️ write failed: Memory flush writes are restricted to memory/2026-05-05.md; use that path only.",
-          isError: true,
-        },
-      ],
-    });
-
-    expect(replyPayloads).toHaveLength(1);
-    expectFields(replyPayloads[0], {
-      text: "⚠️ write failed: Memory flush writes are restricted to memory/2026-05-05.md; use that path only.",
-      isError: true,
+      payloads: [{ text: "normal maintenance reply" }, { text, isError: true }],
+      expected: [{ text, isError: true }],
     });
   });
 
   it("keeps prepared voice media captions during silent turns", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    const payload = { text: "NO_REPLY", mediaUrl: "file:///tmp/voice.opus", audioAsVoice: true };
+    await expectBuiltPayloads({
       silentExpected: true,
-      payloads: [{ text: "NO_REPLY", mediaUrl: "file:///tmp/voice.opus", audioAsVoice: true }],
-    });
-
-    expect(replyPayloads).toHaveLength(1);
-    expectFields(replyPayloads[0], {
-      text: "NO_REPLY",
-      mediaUrl: "file:///tmp/voice.opus",
-      audioAsVoice: true,
+      payloads: [payload],
+      expected: [payload],
     });
   });
 
   it("drops empty voice markers during silent turns", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       silentExpected: true,
       payloads: [{ audioAsVoice: true }],
+      expected: [],
     });
-
-    expect(replyPayloads).toHaveLength(0);
   });
 
   it("preserves inline caption text when lifting markdown image replies into media", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       extractMarkdownImages: true,
       payloads: [{ text: 'Look ![chart](https://example.com/chart.png "Quarterly chart") now' }],
-    });
-
-    expect(replyPayloads).toHaveLength(1);
-    expectFields(replyPayloads[0], {
-      text: "Look now",
-      mediaUrl: "https://example.com/chart.png",
-      mediaUrls: ["https://example.com/chart.png"],
+      expected: [
+        {
+          text: "Look now",
+          mediaUrl: "https://example.com/chart.png",
+          mediaUrls: ["https://example.com/chart.png"],
+        },
+      ],
     });
   });
 
   it("keeps markdown local file images as plain text in final replies", async () => {
     const text = "Look ![chart](file:///etc/passwd) now";
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       extractMarkdownImages: true,
       payloads: [{ text }],
+      expected: [{ text, mediaUrl: undefined, mediaUrls: undefined }],
     });
-
-    expect(replyPayloads).toHaveLength(1);
-    expectFields(replyPayloads[0], {
-      text,
-    });
-    expect(replyPayloads[0]?.mediaUrl).toBeUndefined();
-    expect(replyPayloads[0]?.mediaUrls).toBeUndefined();
   });
 
   it.each<DirectBlockDedupeCase>([
     {
       name: "drops a final caption already sent with direct media (streaming: true)",
-      directBlockPayloads: [
-        setReplyPayloadMetadata(
-          { text: "response", mediaUrl: "/tmp/fetched.png" },
-          { assistantMessageIndex: 1 },
-        ),
-      ],
-      payloads: [setReplyPayloadMetadata({ text: "response" }, { assistantMessageIndex: 1 })],
+      directBlockPayloads: [indexedReply(1, { text: "response", mediaUrl: "/tmp/fetched.png" })],
+      payloads: [indexedReply(1, { text: "response" })],
       params: { blockStreamingEnabled: true },
     },
     {
       name: "preserves the same caption from a different assistant message",
-      directBlockPayloads: [
-        setReplyPayloadMetadata(
-          { text: "response", mediaUrl: "/tmp/fetched.png" },
-          { assistantMessageIndex: 1 },
-        ),
-      ],
-      payloads: [setReplyPayloadMetadata({ text: "response" }, { assistantMessageIndex: 2 })],
+      directBlockPayloads: [indexedReply(1, { text: "response", mediaUrl: "/tmp/fetched.png" })],
+      payloads: [indexedReply(2, { text: "response" })],
       expected: { text: "response" },
     },
     {
@@ -809,14 +708,11 @@ describe("buildReplyPayloads media filter integration", () => {
   it("preserves final text when internal whitespace changed", async () => {
     const directBlockDeliveries: DirectBlockDelivery[] = [
       {
-        payload: setReplyPayloadMetadata({ text: "constx=1" }, { assistantMessageIndex: 1 }),
+        payload: indexedReply(1, { text: "constx=1" }),
         outcome: "delivered",
       },
     ];
-    const finalPayload = setReplyPayloadMetadata(
-      { text: "const x = 1\n\nMEDIA:/tmp/generated.png" },
-      { assistantMessageIndex: 1 },
-    );
+    const finalPayload = indexedReply(1, { text: "const x = 1\n\nMEDIA:/tmp/generated.png" });
 
     const { replyPayloads } = await buildTestReplyPayloads({
       blockStreamingEnabled: true,
@@ -831,7 +727,7 @@ describe("buildReplyPayloads media filter integration", () => {
   });
 
   it("does not suppress same-target replies when accountId differs", async () => {
-    const { replyPayloads } = await buildTestReplyPayloads({
+    await expectBuiltPayloads({
       payloads: [{ text: "hello world!" }],
       messageProvider: "heartbeat",
       originatingChannel: "telegram",
@@ -846,9 +742,7 @@ describe("buildReplyPayloads media filter integration", () => {
           accountId: "work",
         },
       ],
+      expected: [{ text: "hello world!" }],
     });
-
-    expect(replyPayloads).toHaveLength(1);
-    expect(replyPayloads[0]?.text).toBe("hello world!");
   });
 });

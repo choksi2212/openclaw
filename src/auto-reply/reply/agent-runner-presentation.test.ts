@@ -51,6 +51,29 @@ function createPresentation(
   });
 }
 
+function createDeliveryPresentation(
+  onPreparedBlockReply: NonNullable<GetReplyOptions["onPreparedBlockReply"]>,
+  blockReplyPipeline: AgentTurnParams["blockReplyPipeline"] = null,
+  normalizeMediaPaths?: (payload: ReplyPayload) => Promise<ReplyPayload>,
+) {
+  const typing = createTypingController({});
+  const presentation = createPresentation({
+    normalizeMediaPaths,
+    delivery: {
+      opts: { onPreparedBlockReply },
+      blockStreamingEnabled: true,
+      blockReplyPipeline,
+      applyReplyToMode: (payload) => payload,
+      typingSignals: createTypingSignaler({ typing, mode: "never", isHeartbeat: false }),
+    },
+  });
+  const handler = presentation.blockReplyHandler;
+  if (!handler) {
+    throw new Error("expected the prepared block delivery handler");
+  }
+  return { handler, typing };
+}
+
 describe("agent runner streaming presentation", () => {
   it("refreshes typing for whitespace appended while typing sends are failing", async () => {
     vi.useFakeTimers();
@@ -105,9 +128,10 @@ describe("agent runner streaming presentation", () => {
   ])("preserves $name policy across attachment normalization", async ({ caption, silent }) => {
     const retainedMedia = "https://example.invalid/retained.png";
     const delivered = vi.fn(async (_payload: ReplyPayload) => {});
-    const typing = createTypingController({});
-    const presentation = createPresentation({
-      normalizeMediaPaths: async (payload) => ({
+    const { handler, typing } = createDeliveryPresentation(
+      async (plan) => delivered(plan.payload),
+      null,
+      async (payload) => ({
         ...payload,
         text: appendReplyMediaFailures(payload.text, [
           { code: "delivery-failed", kind: "image", label: "Example" },
@@ -115,18 +139,7 @@ describe("agent runner streaming presentation", () => {
         mediaUrl: retainedMedia,
         mediaUrls: [retainedMedia],
       }),
-      delivery: {
-        opts: { onPreparedBlockReply: async (plan) => delivered(plan.payload) },
-        blockStreamingEnabled: true,
-        blockReplyPipeline: null,
-        applyReplyToMode: (payload) => payload,
-        typingSignals: createTypingSignaler({ typing, mode: "never", isHeartbeat: false }),
-      },
-    });
-    const handler = presentation.blockReplyHandler;
-    if (!handler) {
-      throw new Error("expected the prepared block delivery handler");
-    }
+    );
     try {
       await handler(
         setReplyPayloadMetadata(
@@ -151,27 +164,17 @@ describe("agent runner streaming presentation", () => {
   });
 
   it.each([
-    {
-      name: "producer-authored silence",
-      text: "NO_REPLY",
-      silent: true,
-      expected: "First.\n\nLast.",
-    },
-    {
-      name: "prepared literal suffix",
-      text: "NO_REPLY",
-      silent: false,
-      expected: "First.\n\nNO_REPLY\n\nLast.",
-    },
-    {
-      name: "directive-stripped literal",
-      text: "[tool calls omitted]\nNO_REPLY",
-      silent: false,
-      expected: "First.\n\nNO_REPLY\n\nLast.",
-    },
-  ])(
-    "preserves $name policy through coalesced prepared delivery",
-    async ({ text, silent, expected }) => {
+    ["producer-authored silence", "NO_REPLY", true, "First.\n\nLast."],
+    ["prepared literal suffix", "NO_REPLY", false, "First.\n\nNO_REPLY\n\nLast."],
+    [
+      "directive-stripped literal",
+      "[tool calls omitted]\nNO_REPLY",
+      false,
+      "First.\n\nNO_REPLY\n\nLast.",
+    ],
+  ] as const)(
+    "preserves %s policy through coalesced prepared delivery",
+    async (_name, text, silent, expected) => {
       const delivered = vi.fn(async (_payload: ReplyPayload) => {});
       const dispatcher = createReplyDispatcher({
         deliver: delivered,
@@ -192,20 +195,7 @@ describe("agent runner streaming presentation", () => {
         timeoutMs: 0,
         coalescing: { minChars: 1, maxChars: 1200, idleMs: 0, joiner: "\n\n" },
       });
-      const typing = createTypingController({});
-      const presentation = createPresentation({
-        delivery: {
-          opts: { onPreparedBlockReply: forwardPrepared },
-          blockStreamingEnabled: true,
-          blockReplyPipeline: pipeline,
-          applyReplyToMode: (payload) => payload,
-          typingSignals: createTypingSignaler({ typing, mode: "never", isHeartbeat: false }),
-        },
-      });
-      const handler = presentation.blockReplyHandler;
-      if (!handler) {
-        throw new Error("expected the prepared block delivery handler");
-      }
+      const { handler, typing } = createDeliveryPresentation(forwardPrepared, pipeline);
       const middle = setReplyPayloadMetadata({ text }, silent ? { silentReply: true } : {});
       try {
         await handler({ text: "First." });
@@ -399,18 +389,13 @@ describe("agent runner streaming presentation", () => {
   });
 
   it("presents streaming control tokens without changing final text", async () => {
-    const cases: Array<{
-      payload: ReplyPayload;
-      options?: Parameters<typeof createPresentation>[0];
-      expected: { text?: string; skip: boolean };
-    }> = [
-      { payload: { text: "visible answer" }, expected: { text: "visible answer", skip: false } },
-      { payload: { text: "H" }, expected: { text: "H", skip: false } },
-      {
-        payload: { text: "HEARTBEAT_OK visible after heartbeat" },
-        expected: { text: "visible after heartbeat", skip: false },
-      },
+    const visible = (text: string) => ({ text, skip: false });
+    const cases: Array<
+      [ReplyPayload, { text?: string; skip: boolean }, Parameters<typeof createPresentation>[0]?]
+    > = [
       ...[
+        "visible answer",
+        "H",
         "N",
         "NO_",
         "NO_REPLY",
@@ -418,39 +403,20 @@ describe("agent runner streaming presentation", () => {
         '"NO_REPLY"',
         '{"action":"NO_REPLY"}',
         "HEARTBEAT_",
-      ].map((text) => ({ payload: { text }, expected: { text, skip: false } })),
-      ...["HEARTBEAT_OK", " ", "  ", "  \n", "[tool calls omitted]"].map((text) => ({
-        payload: { text },
-        expected: { skip: true },
-      })),
-      {
-        payload: { text: "NO_REPLYVisible" },
-        expected: { text: "NO_REPLYVisible", skip: false },
-      },
-      {
-        payload: { text: "NO_REPLYVisible answer" },
-        expected: { text: "NO_REPLYVisible answer", skip: false },
-      },
-      {
-        payload: { text: "NO_REPLY\nVisible answer" },
-        expected: { text: "NO_REPLY\nVisible answer", skip: false },
-      },
-      {
-        payload: { mediaUrls: ["https://example.invalid/image.png"] },
-        expected: { text: undefined, skip: false },
-      },
-      { payload: { text: "visible" }, options: { silentExpected: true }, expected: { skip: true } },
-      {
-        payload: { text: "HEARTBEAT_OK details" },
-        options: { isHeartbeat: true },
-        expected: { text: "HEARTBEAT_OK details", skip: false },
-      },
-      {
-        payload: { text: "No, that is wrong." },
-        expected: { text: "No, that is wrong.", skip: false },
-      },
+        "NO_REPLYVisible",
+        "NO_REPLYVisible answer",
+        "NO_REPLY\nVisible answer",
+        "No, that is wrong.",
+      ].map((text): [ReplyPayload, { text: string; skip: boolean }] => [{ text }, visible(text)]),
+      ...["HEARTBEAT_OK", " ", "  ", "  \n", "[tool calls omitted]"].map(
+        (text): [ReplyPayload, { skip: boolean }] => [{ text }, { skip: true }],
+      ),
+      [{ text: "HEARTBEAT_OK visible after heartbeat" }, visible("visible after heartbeat")],
+      [{ mediaUrls: ["https://example.invalid/image.png"] }, { text: undefined, skip: false }],
+      [{ text: "visible" }, { skip: true }, { silentExpected: true }],
+      [{ text: "HEARTBEAT_OK details" }, visible("HEARTBEAT_OK details"), { isHeartbeat: true }],
     ];
-    for (const { payload, options, expected } of cases) {
+    for (const [payload, expected, options] of cases) {
       const onPartialReply = vi.fn<NonNullable<GetReplyOptions["onPartialReply"]>>();
       const presentation = createPresentation({ ...options, onPartialReply });
       await presentation.presentPartialReply(payload, "cli");
