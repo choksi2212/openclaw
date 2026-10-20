@@ -1,15 +1,15 @@
-// Windows integration coverage for host-local file URLs through registered media tools.
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import * as imageGenerationRuntime from "../../image-generation/runtime.js";
+import * as imageRuntime from "../../image-generation/runtime.js";
 import * as mediaStore from "../../media/store.js";
+import { expectDefined } from "../../plugin-sdk/expect-runtime.js";
+import { withTempDir } from "../../test-utils/temp-dir.js";
 import { createOpenClawTools } from "../openclaw-tools.js";
 import { createImageGenerateTool } from "./image-generate-tool.js";
-import * as mediaGenerationToolProviders from "./media-generation-tool-providers.js";
+import * as mediaProviders from "./media-generation-tool-providers.js";
 import * as pdfNativeProviders from "./pdf-native-providers.js";
 import {
   createPdfToolInfraStub,
@@ -27,9 +27,7 @@ vi.mock("../../llm/stream.js", async () => {
 
 vi.mock("../provider-stream.js", () => ({ registerProviderStreamForModel: vi.fn() }));
 
-vi.mock("../openclaw-plugin-tools.js", () => ({
-  resolveOpenClawPluginToolsForOptions: () => [],
-}));
+vi.mock("../openclaw-plugin-tools.js", () => ({ resolveOpenClawPluginToolsForOptions: () => [] }));
 
 const { stubPdfToolInfra } = createPdfToolInfraStub(completeMock);
 const ONE_PIXEL_PNG = Buffer.from(
@@ -38,12 +36,10 @@ const ONE_PIXEL_PNG = Buffer.from(
 );
 
 function requireTool(tools: ReturnType<typeof createOpenClawTools>, name: "view_image" | "pdf") {
-  const tool = tools.find((candidate) => candidate.name === name);
-  expect(tool, `${name} tool registration`).toBeDefined();
-  if (!tool) {
-    throw new Error(`expected registered ${name} tool`);
-  }
-  return tool;
+  return expectDefined(
+    tools.find((tool) => tool.name === name),
+    `registered ${name} tool`,
+  );
 }
 
 describe.runIf(process.platform === "win32")("host-local media tool file URLs", () => {
@@ -58,9 +54,8 @@ describe.runIf(process.platform === "win32")("host-local media tool file URLs", 
   });
 
   it("loads Unicode and space file URLs through registered image and PDF tools", async () => {
-    await withTempPdfAgentDir(async (agentDir) => {
-      const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-media-file-url-Å "));
-      try {
+    await withTempPdfAgentDir((agentDir) =>
+      withTempDir("openclaw-media-file-url-Å ", async (workspaceDir) => {
         const imagePath = path.join(workspaceDir, "café image.png");
         const pdfPath = path.join(workspaceDir, "résumé document.pdf");
         await fs.writeFile(imagePath, ONE_PIXEL_PNG);
@@ -123,16 +118,13 @@ describe.runIf(process.platform === "win32")("host-local media tool file URLs", 
             }),
           },
         ];
-        vi.spyOn(
-          mediaGenerationToolProviders,
-          "acquireMediaGenerationToolProviders",
-        ).mockResolvedValue({
+        vi.spyOn(mediaProviders, "acquireMediaGenerationToolProviders").mockResolvedValue({
           providers,
           assertOpen() {},
           run: async (run) => await run(),
           release: async () => {},
         });
-        const generateImage = vi.spyOn(imageGenerationRuntime, "generateImage").mockResolvedValue({
+        const generateImage = vi.spyOn(imageRuntime, "generateImage").mockResolvedValue({
           provider: "fixture",
           model: "edit",
           attempts: [],
@@ -145,33 +137,25 @@ describe.runIf(process.platform === "win32")("host-local media tool file URLs", 
           size: ONE_PIXEL_PNG.length,
           contentType: "image/png",
         });
-        const generationTool = createImageGenerateTool({
-          agentDir,
-          workspaceDir,
-          config: {
-            agents: {
-              defaults: {
-                mediaModels: { image: { primary: "fixture/edit" } },
-              },
+        const generationTool = expectDefined(
+          createImageGenerateTool({
+            agentDir,
+            workspaceDir,
+            config: {
+              agents: { defaults: { mediaModels: { image: { primary: "fixture/edit" } } } },
             },
-          },
-        });
-        expect(generationTool?.name).toBe("image_generate");
-        if (!generationTool) {
-          throw new Error("expected image_generate tool");
-        }
+          }),
+          "image_generate tool",
+        );
+        expect(generationTool.name).toBe("image_generate");
         await generationTool.execute("generation-call", {
           prompt: "edit the reference",
           image: imageUrl,
         });
-        expect(generateImage.mock.calls[0]?.[0]).toEqual(
-          expect.objectContaining({
-            inputImages: [expect.objectContaining({ buffer: ONE_PIXEL_PNG })],
-          }),
-        );
-      } finally {
-        await fs.rm(workspaceDir, { recursive: true, force: true });
-      }
-    });
+        expect(generateImage.mock.calls[0]?.[0]).toMatchObject({
+          inputImages: [{ buffer: ONE_PIXEL_PNG }],
+        });
+      }),
+    );
   });
 });

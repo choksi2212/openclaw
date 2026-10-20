@@ -27,7 +27,10 @@ export async function withCronMessageRun<T>(
   params: { cfg: OpenClawConfig; storePath: string; sessionKey: string; sessionId: string },
   run: (owner: CronMessageRun) => Promise<T>,
 ): Promise<T> {
+  const { cfg, storePath, sessionKey, sessionId } = params;
+  const identity = { agentId: "main", runId: "message-entrypoint-run", sessionId };
   const scheduledToolPolicy = { version: 1, mode: "trusted" } as const;
+  const scope = { ...identity, sessionKey, scheduledToolPolicy };
   const job = {
     ...makeCronReceiptJob("message-entrypoint", "main"),
     payload: {
@@ -38,10 +41,10 @@ export async function withCronMessageRun<T>(
     delivery: { mode: "none" as const },
     scheduledToolPolicy,
   };
-  await saveCronStore(params.storePath, { version: 1, jobs: [job] });
+  await saveCronStore(storePath, { version: 1, jobs: [job] });
   const result: { outcome?: { ok: true; value: T } | { ok: false; error: unknown } } = {};
   const cron = new CronService({
-    storePath: params.storePath,
+    storePath,
     scheduler: createTestGatewayScheduler(),
     cronEnabled: true,
     defaultAgentId: "main",
@@ -49,19 +52,14 @@ export async function withCronMessageRun<T>(
     enqueueSystemEvent() {},
     requestHeartbeat() {},
     runIsolatedAgentJob: async (execution) => {
-      const runId = "message-entrypoint-run";
       const admission = prepareCronRunAdmission({
-        cfg: params.cfg,
-        agentId: "main",
-        runId,
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
+        ...scope,
+        cfg,
         jobId: job.id,
         admissionSource: execution.admissionSource,
         deliveryAttemptFence: execution.deliveryAttemptFence,
         executionIdentity: execution.executionIdentity,
         toolsAllow: ["message"],
-        scheduledToolPolicy,
       });
       try {
         const admitted = await admission.preparedRunAdmission.admit("embedded");
@@ -71,15 +69,8 @@ export async function withCronMessageRun<T>(
         }
         const catalog: ReturnType<typeof createMessageTool>[] = [];
         const invocationPolicy = createEmbeddedMessageInvocationPolicy({
-          config: params.cfg,
-          capabilityProfile: resolveConversationCapabilityProfile({
-            config: params.cfg,
-            agentId: "main",
-            runId,
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            scheduledToolPolicy,
-          }),
+          config: cfg,
+          capabilityProfile: resolveConversationCapabilityProfile({ ...scope, config: cfg }),
           runtimeProfileAlsoAllow: ["message"],
           toolSearchControlAllowlist: [],
           scheduledToolPolicy,
@@ -89,17 +80,15 @@ export async function withCronMessageRun<T>(
         const value = await run({
           admitted,
           messageActionTurnCapability,
-          runId,
-          sessionId: params.sessionId,
-          sessionKey: params.sessionKey,
+          runId: identity.runId,
+          sessionId,
+          sessionKey,
           createTool(options = {}) {
             const tool = createMessageTool({
               ...options,
-              config: params.cfg,
-              agentId: "main",
-              runId,
-              sessionId: params.sessionId,
-              agentSessionKey: params.sessionKey,
+              ...identity,
+              config: cfg,
+              agentSessionKey: sessionKey,
               agentAccountId: "default",
               messageActionTurnCapability,
               admitScheduledInvocation: invocationPolicy.admit,

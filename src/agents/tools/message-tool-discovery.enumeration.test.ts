@@ -1,99 +1,77 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 
-const store = vi.hoisted(() => {
-  const state = {
-    rows: {} as Record<string, unknown>,
-    loadExactSessionEntryReadOnly: vi.fn((scope: { sessionKey: string }) => {
-      const entry = state.rows[scope.sessionKey];
-      return entry ? { sessionKey: scope.sessionKey, entry } : undefined;
-    }),
-  };
-  return state;
-});
-
-const getChannelPluginMock = vi.hoisted(() => vi.fn());
-
+const mocks = vi.hoisted(() => ({ read: vi.fn(), plugin: vi.fn() }));
 vi.mock("../../config/sessions/session-entry-read-runtime.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../config/sessions/session-entry-read-runtime.js")>()),
-  readSessionEntryReadOnlyInWorker: async (scope: { sessionKey: string }) =>
-    store.loadExactSessionEntryReadOnly(scope)?.entry,
+  readSessionEntryReadOnlyInWorker: mocks.read,
 }));
-
 vi.mock("../../config/sessions/paths.js", () => ({
   resolveSessionStorePathCore: (_store: unknown, opts?: { agentId?: string }) =>
     `/tmp/${opts?.agentId ?? "main"}-sessions.sqlite`,
 }));
-
 vi.mock("../../config/sessions/targets.js", () => ({
   resolveAllAgentSessionStoreTargetsSync: () => [
     { agentId: "main", storePath: "/tmp/main-sessions.sqlite" },
     { agentId: "main", storePath: "/tmp/secondary-sessions.sqlite" },
   ],
 }));
-
 vi.mock("../../channels/plugins/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../channels/plugins/index.js")>()),
-  getChannelPlugin: getChannelPluginMock,
+  getChannelPlugin: mocks.plugin,
 }));
-
 import { resolveEffectiveCurrentChannelContextForRequest } from "./message-tool-discovery.js";
 
 const CANONICAL_SPACE = "spaces/AAQA1bC2dEf";
 const FOLDED_SPACE = "spaces/aaqa1bc2def";
 const SESSION_KEY = `agent:main:googlechat:group:${FOLDED_SPACE}`;
-
-function resolveContext(sessionId?: string) {
-  return resolveEffectiveCurrentChannelContextForRequest(
+beforeEach(() => {
+  mocks.read.mockReset().mockImplementation(({ sessionKey }: { sessionKey: string }) =>
+    sessionKey === SESSION_KEY
+      ? {
+          sessionId: "s1",
+          updatedAt: 1,
+          delivery: {
+            kind: "external",
+            context: { channel: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
+          },
+        }
+      : undefined,
+  );
+  mocks.plugin.mockReset().mockReturnValue({
+    config: { listAccountIds: () => ["default"] },
+    messaging: { targetIdComparison: "case-sensitive" },
+  });
+});
+it.each([
+  {
+    name: "recovers canonical casing",
+    sessionId: undefined,
+    lowercase: false,
+    target: CANONICAL_SPACE,
+    reads: [SESSION_KEY],
+  },
+  {
+    name: "rejects a replacement session",
+    sessionId: "previous-session",
+    lowercase: false,
+    target: FOLDED_SPACE,
+    reads: [SESSION_KEY],
+  },
+  {
+    name: "does not read lowercase-canonical channels",
+    sessionId: undefined,
+    lowercase: true,
+    target: FOLDED_SPACE,
+    reads: [],
+  },
+])("$name without enumerating the store", async ({ sessionId, lowercase, target, reads }) => {
+  if (lowercase) {
+    mocks.plugin.mockReturnValue({ messaging: { targetIdComparison: "lowercase" } });
+  }
+  const result = await resolveEffectiveCurrentChannelContextForRequest(
     { currentChannelProvider: "webchat", agentSessionKey: SESSION_KEY, sessionId },
     { config: {}, action: "send", params: {} },
   );
-}
-
-function expectReads(keys: string[]) {
-  expect(store.loadExactSessionEntryReadOnly.mock.calls.map(([scope]) => scope.sessionKey)).toEqual(
-    keys,
-  );
-}
-
-describe("canonical destination recovery stays bounded", () => {
-  beforeEach(() => {
-    store.rows = {
-      [SESSION_KEY]: {
-        sessionId: "s1",
-        updatedAt: 1,
-        delivery: {
-          kind: "external",
-          route: { channel: "googlechat", target: { to: `googlechat:${CANONICAL_SPACE}` } },
-          context: { channel: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
-          origin: { provider: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
-        },
-      },
-    };
-    store.loadExactSessionEntryReadOnly.mockClear();
-    getChannelPluginMock.mockReset();
-    getChannelPluginMock.mockReturnValue({
-      config: { listAccountIds: () => ["default"] },
-      messaging: { targetIdComparison: "case-sensitive" },
-    });
-  });
-
-  it("recovers the canonical casing without enumerating the store", async () => {
-    expect(await resolveContext()).toMatchObject({
-      currentChannelId: CANONICAL_SPACE,
-      currentMessagingTarget: CANONICAL_SPACE,
-    });
-    expectReads([SESSION_KEY]);
-  });
-
-  it("does not recover delivery from a replacement session at the same key", async () => {
-    const result = await resolveContext("previous-session");
-    expect(result.currentMessagingTarget).toBe(FOLDED_SPACE);
-    expectReads([SESSION_KEY]);
-  });
-
-  it("reads no store at all for a channel with lowercase-canonical target ids", async () => {
-    getChannelPluginMock.mockReturnValue({ messaging: { targetIdComparison: "lowercase" } });
-    await resolveContext();
-    expectReads([]);
-  });
+  expect(result).toMatchObject({ currentChannelId: target, currentMessagingTarget: target });
+  expect(mocks.read.mock.calls.map(([scope]) => scope.sessionKey)).toEqual(reads);
 });

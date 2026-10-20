@@ -56,6 +56,21 @@ afterEach(() => {
 });
 
 describe("completion source-reply authority", () => {
+  const replyTag = "[[reply_to:message-2]]";
+  const audioTag = "[[audio_as_voice]]";
+  function createSourceTool(
+    config: MessageToolOptions["config"],
+    options: Partial<MessageToolOptions>,
+  ) {
+    return createMessageTool({
+      config,
+      sourceReplyOnly: true,
+      sourceReplyDeliveryMode: "message_tool_only",
+      currentThreadTs: "thread-1",
+      currentMessageId: "message-1",
+      ...options,
+    });
+  }
   function createRestrictedTool(overrides: Partial<MessageToolOptions> = {}) {
     const config = overrides.config ?? {};
     setRuntimeConfigSnapshot(config);
@@ -71,14 +86,9 @@ describe("completion source-reply authority", () => {
         },
       },
     });
-    return createMessageTool({
-      config,
-      sourceReplyOnly: true,
-      sourceReplyDeliveryMode: "message_tool_only",
+    return createSourceTool(config, {
       currentChannelProvider: "discord",
       currentChannelId: "channel:source",
-      currentThreadTs: "thread-1",
-      currentMessageId: "message-1",
       agentAccountId: "source-account",
       ...overrides,
     });
@@ -99,41 +109,29 @@ describe("completion source-reply authority", () => {
     ["gateway token", { gatewayToken: "other-token" }],
     ["inline buffer", { buffer: "c2VjcmV0" }],
     ["unknown plugin argument", { pluginFile: "./AGENTS.md" }],
-    ["inline reply route", { message: "[[reply_to:message-2]] stolen thread" }],
+    ["inline reply route", { message: `${replyTag} stolen thread` }],
     [
-      "reply directive inside a media-only URL",
-      {
-        media: undefined,
-        message: "MEDIA:https://example.com/a[[reply_to:message-2]].png",
-      },
+      "media URL reply",
+      { media: undefined, message: `MEDIA:https://example.com/a${replyTag}.png` },
     ],
-    [
-      "reply directive inside a media caption",
-      {
-        message: "",
-        caption: "MEDIA:https://example.com/a[[reply_to:message-2]].png",
-      },
-    ],
-    [
-      "audio directive inside a media URL",
-      { message: "MEDIA:https://example.com/a[[audio_as_voice]].ogg" },
-    ],
-    ["caption reply route", { message: "", caption: "[[reply_to:message-2]] stolen thread" }],
-    ["caption audio directive", { message: " ", caption: "[[audio_as_voice]] completion" }],
+    ["media caption reply", { message: "", caption: `MEDIA:https://example.com/a${replyTag}.png` }],
+    ["media URL audio", { message: `MEDIA:https://example.com/a${audioTag}.ogg` }],
+    ["caption reply route", { message: "", caption: `${replyTag} stolen thread` }],
+    ["caption audio directive", { message: " ", caption: `${audioTag} completion` }],
     [
       "reply directive after an indented fence",
       { message: "    ```text\n[[reply_to:message-2]] stolen thread\n```" },
     ],
-    ["inline audio directive", { message: "[[audio_as_voice]] completion" }],
-    ["reply directive inside citation marker", { message: "cite[[reply_to:message-2]]" }],
+    ["inline audio directive", { message: `${audioTag} completion` }],
+    ["citation marker reply", { message: `cite${replyTag}` }],
     [
-      "audio directive escaping a tool-call-owned Markdown fence",
+      "tool-owned fence audio",
       {
         message: [
           "<function=read><parameter=x>",
           "```text",
           "</parameter></function>",
-          "[[audio_as_voice]] completion",
+          `${audioTag} completion`,
           "```",
         ].join("\n"),
       },
@@ -181,15 +179,10 @@ describe("completion source-reply authority", () => {
         },
       },
     });
-    const tool = createMessageTool({
-      config,
-      sourceReplyOnly: true,
-      sourceReplyDeliveryMode: "message_tool_only",
+    const tool = createSourceTool(config, {
       agentSessionKey: "agent:main:workspace:group:SOURCE",
       currentChannelProvider: "workspace",
       currentChannelId: "SOURCE",
-      currentThreadTs: "thread-1",
-      currentMessageId: "message-1",
     });
     return { tool, sendMedia };
   }
@@ -277,26 +270,26 @@ describe("completion source-reply authority", () => {
     });
     const tool = createRestrictedTool();
 
-    await tool.execute("implicit", { action: "send", message: "completion", final: true });
-    await tool.execute("literal-no-reply", { action: "send", message: "NO_REPLY", final: true });
-    await tool.execute("media-prose", {
-      action: "send",
-      message: "See the MEDIA: section for details.",
-    });
-    await tool.execute("media-code-example", {
-      action: "send",
-      message: "Example:\n```text\nMEDIA:./AGENTS.md\n```",
-    });
-    await tool.execute("explicit", {
-      action: "send",
-      channel: "discord",
-      target: "channel:source",
-      accountId: "source-account",
-      threadId: "thread-1",
-      replyTo: "message-1",
-      message: "completion",
-      final: false,
-    });
+    for (const [id, args] of [
+      ["implicit", { message: "completion", final: true }],
+      ["literal-no-reply", { message: "NO_REPLY", final: true }],
+      ["media-prose", { message: "See the MEDIA: section for details." }],
+      ["media-code-example", { message: "Example:\n```text\nMEDIA:./AGENTS.md\n```" }],
+      [
+        "explicit",
+        {
+          channel: "discord",
+          target: "channel:source",
+          accountId: "source-account",
+          threadId: "thread-1",
+          replyTo: "message-1",
+          message: "completion",
+          final: false,
+        },
+      ],
+    ] as const) {
+      await tool.execute(id, { action: "send", ...args });
+    }
 
     expect(mocks.runMessageAction).toHaveBeenCalledTimes(5);
     expect(mocks.runMessageAction).toHaveBeenNthCalledWith(
