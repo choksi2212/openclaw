@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { expect } from "vitest";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import { setRuntimeConfigSnapshot } from "../../config/config.js";
@@ -36,6 +37,7 @@ import { makeCronJob } from "../delivery.test-helpers.js";
 import { createCliDeps } from "../isolated-agent.delivery.test-helpers.js";
 import type { CronStoredJob } from "../types.js";
 import type { DispatchCronDeliveryParams } from "./delivery-dispatch-types.js";
+import type { dispatchCronDelivery } from "./delivery-dispatch.js";
 
 export const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=",
@@ -60,6 +62,21 @@ export function installCompletionChannel(
       },
     ]),
   );
+}
+
+export function expectDeliveryWarning(
+  result: Awaited<ReturnType<typeof dispatchCronDelivery>>,
+  message: unknown,
+) {
+  expect(result).toMatchObject({
+    delivered: true,
+    deliveryError: undefined,
+    diagnostics: {
+      entries: expect.arrayContaining([
+        expect.objectContaining({ source: "delivery", severity: "warn", message }),
+      ]),
+    },
+  });
 }
 
 export function withCompletionFixture(
@@ -147,6 +164,13 @@ async function createCompletionFixture(
   const records = () => listManagedImageRecordEntries({ stateDir: state.stateDir, sessionKey });
   const database = openOpenClawStateDatabase({ env: state.env });
   const downloads: Array<ReturnType<typeof resolveManagedOutgoingMediaArtifactDownload>> = [];
+  const downloadAttachment = (attachmentId: string) =>
+    resolveManagedOutgoingMediaArtifactDownload({
+      sessionKey,
+      agentId: "main",
+      stateDir: state.stateDir,
+      artifactId: `${MANAGED_OUTGOING_IMAGE_ARTIFACT_ID_PREFIX}${attachmentId}`,
+    });
   const readDownloads = async () =>
     (await Promise.allSettled(downloads)).map((result) => {
       if (result.status === "rejected") {
@@ -166,12 +190,7 @@ async function createCompletionFixture(
       database.db,
     );
     for (const { record } of entries) {
-      const pending = resolveManagedOutgoingMediaArtifactDownload({
-        sessionKey,
-        agentId: "main",
-        stateDir: state.stateDir,
-        artifactId: `${MANAGED_OUTGOING_IMAGE_ARTIFACT_ID_PREFIX}${record.attachmentId}`,
-      });
+      const pending = downloadAttachment(record.attachmentId);
       void pending.catch(() => {});
       downloads.push(pending);
     }
@@ -183,6 +202,7 @@ async function createCompletionFixture(
     scope,
     records,
     downloads: readDownloads,
+    downloadAttachment,
     updates: () => updates,
     [Symbol.asyncDispose]: async () => {
       unsubscribe();
