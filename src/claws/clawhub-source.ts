@@ -316,8 +316,8 @@ export async function readClawHubClawDetail(
   return {
     ...projectCatalogEntry(pkg),
     version,
-    ...(summary.agent.name ? { agentName: summary.agent.name } : {}),
-    ...(summary.agent.description ? { agentDescription: summary.agent.description } : {}),
+    ...(summary.name ? { agentName: summary.name } : {}),
+    ...(summary.description ? { agentDescription: summary.description } : {}),
     workspaceFiles: contents.instructions.length,
     skills: contents.skills.length,
     plugins: contents.integrations.filter((item) => item.kind === "plugin").length,
