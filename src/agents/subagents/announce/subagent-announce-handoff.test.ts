@@ -25,50 +25,41 @@ const subagentCompletionEvent: AgentInternalEvent = {
   result: "child finished",
   replyInstruction: "Relay this completion.",
 };
+const completionInput = {
+  inputProvenance: announceProvenance,
+  internalEvents: [subagentCompletionEvent],
+};
 
 describe("isSubagentAnnounceCompletionHandoff", () => {
+  const matches = (overrides: Parameters<typeof isSubagentAnnounceCompletionHandoff>[0] = {}) =>
+    isSubagentAnnounceCompletionHandoff({
+      ...completionInput,
+      ...overrides,
+    });
+
   it("matches an inter-session subagent completion announce", () => {
-    expect(
-      isSubagentAnnounceCompletionHandoff({
-        inputProvenance: announceProvenance,
-        internalEvents: [subagentCompletionEvent],
-      }),
-    ).toBe(true);
+    expect(matches()).toBe(true);
   });
 
   it("rejects human and non-completion inter-session turns", () => {
-    expect(isSubagentAnnounceCompletionHandoff({ internalEvents: [subagentCompletionEvent] })).toBe(
-      false,
-    );
+    expect(matches({ inputProvenance: undefined })).toBe(false);
     expect(
-      isSubagentAnnounceCompletionHandoff({
-        inputProvenance: { ...announceProvenance, sourceTool: "sessions_send" },
-        internalEvents: [subagentCompletionEvent],
-      }),
+      matches({ inputProvenance: { ...announceProvenance, sourceTool: "sessions_send" } }),
     ).toBe(false);
-    expect(
-      isSubagentAnnounceCompletionHandoff({
-        inputProvenance: announceProvenance,
-        internalEvents: [],
-      }),
-    ).toBe(false);
+    expect(matches({ internalEvents: [] })).toBe(false);
   });
 
   it("keeps malformed completion announces in the broad deny class", () => {
     expect(
-      isSubagentAnnounceCompletionHandoff({
-        inputProvenance: announceProvenance,
+      matches({
         internalEvents: [
           { ...subagentCompletionEvent, childSessionKey: "agent:openclaw:subagent:forged" },
         ],
       }),
     ).toBe(true);
-    expect(
-      isSubagentAnnounceCompletionHandoff({
-        inputProvenance: announceProvenance,
-        internalEvents: [subagentCompletionEvent, subagentCompletionEvent],
-      }),
-    ).toBe(true);
+    expect(matches({ internalEvents: [subagentCompletionEvent, subagentCompletionEvent] })).toBe(
+      true,
+    );
   });
 });
 
@@ -83,8 +74,7 @@ describe("isTrustedSubagentCompletionHandoffForRun", () => {
       provider: "openai",
       model: "glm-4.5",
     } as const,
-    inputProvenance: announceProvenance,
-    internalEvents: [subagentCompletionEvent],
+    ...completionInput,
     sessionKey: "agent:main:main",
     sessionId: "requester-session",
     provider: "openai",

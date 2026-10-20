@@ -5,42 +5,43 @@ import { captureSessionTarget } from "../../../sessions/session-controller.targe
 import { deliverSubagentAnnouncement, testing } from "./subagent-announce-delivery.test-support.js";
 
 const sentDeliveryStatus = { status: "sent", resultCount: 1 } as const;
+const payloads = (text = "parent answer") => [{ text }];
+const visibleResult = { payloads: payloads(), deliveryStatus: sentDeliveryStatus };
+const silentResult = { payloads: [], meta: { terminalReply: { disposition: "silent" } } };
+const missingReply = { delivered: false, reason: "visible_reply_missing" };
+const visibleReply = { delivered: true, requesterVisibleFinalDelivered: true };
+const policySuppression = {
+  payloads: payloads(),
+  deliveryStatus: { status: "suppressed", reason: "message_tool_only", resultCount: 0 },
+};
+const settleCase = (
+  name: string,
+  response: unknown,
+  expected: Record<string, unknown> = missingReply,
+) => ({ name, response, expected });
 
 describe("yielded private settle outcomes", () => {
   it.each([
+    settleCase("delivered final", { status: "ok", result: visibleResult }, visibleReply),
     {
-      name: "delivered final",
-      response: {
-        status: "ok",
-        result: { payloads: [{ text: "parent answer" }], deliveryStatus: sentDeliveryStatus },
-      },
-      expected: { delivered: true, requesterVisibleFinalDelivered: true },
-    },
-    {
-      name: "required public reply in a group that allows silence",
+      ...settleCase(
+        "required public reply in a group that allows silence",
+        {
+          status: "ok",
+          result: visibleResult,
+        },
+        visibleReply,
+      ),
       public: true,
       group: true,
-      response: {
-        status: "ok",
-        result: { payloads: [{ text: "parent answer" }], deliveryStatus: sentDeliveryStatus },
-      },
-      expected: { delivered: true, requesterVisibleFinalDelivered: true },
     },
-    {
-      name: "intentional silence",
-      response: {
-        status: "ok",
-        result: { payloads: [], meta: { terminalReply: { disposition: "silent" } } },
-      },
-      expected: { delivered: true },
-    },
+    settleCase("intentional silence", { status: "ok", result: silentResult }, { delivered: true }),
     ...["ok", "timeout"].map((status) => ({
       name: `normalized silent result: ${status}`,
       response: {
         status,
         result: {
-          payloads: [],
-          meta: { terminalReply: { disposition: "silent" } },
+          ...silentResult,
           deliveryStatus: {
             status: "suppressed",
             succeeded: true,
@@ -49,45 +50,22 @@ describe("yielded private settle outcomes", () => {
           },
         },
       },
-      expected:
-        status === "ok"
-          ? { delivered: true }
-          : { delivered: false, reason: "visible_reply_missing" },
+      expected: status === "ok" ? { delivered: true } : missingReply,
     })),
-    {
-      name: "runtime timeout",
-      response: { status: "timeout", summary: "aborted", stopReason: "timeout" },
-      expected: { delivered: false, reason: "visible_reply_missing" },
-    },
-    {
-      name: "failed turn",
-      response: { status: "error" },
-      expected: { delivered: false, reason: "visible_reply_missing" },
-    },
-    {
-      name: "empty successful turn",
-      response: { status: "ok", result: { payloads: [] } },
-      expected: { delivered: false, reason: "visible_reply_missing" },
-    },
-    {
-      name: "failed silence",
-      response: {
-        status: "ok",
-        result: {
-          payloads: [],
-          meta: { aborted: true, terminalReply: { disposition: "silent" } },
-        },
-      },
-      expected: { delivered: false, reason: "visible_reply_missing" },
-    },
-    {
-      name: "undelivered text",
-      response: { status: "ok", result: { payloads: [{ text: "unsent answer" }] } },
-      expected: { delivered: false, reason: "visible_reply_missing" },
-    },
-    {
-      name: "message-tool room: final sent with the message tool",
-      response: {
+    settleCase("runtime timeout", { status: "timeout", summary: "aborted", stopReason: "timeout" }),
+    settleCase("failed turn", { status: "error" }),
+    settleCase("empty successful turn", { status: "ok", result: { payloads: [] } }),
+    settleCase("failed silence", {
+      status: "ok",
+      result: { ...silentResult, meta: { ...silentResult.meta, aborted: true } },
+    }),
+    settleCase("undelivered text", {
+      status: "ok",
+      result: { payloads: payloads("unsent answer") },
+    }),
+    settleCase(
+      "message-tool room: final sent with the message tool",
+      {
         status: "ok",
         result: {
           payloads: [],
@@ -104,35 +82,20 @@ describe("yielded private settle outcomes", () => {
           ],
         },
       },
-      expected: { delivered: true, requesterVisibleFinalDelivered: true },
-    },
+      visibleReply,
+    ),
+    settleCase(
+      "message-tool room: plain final suppressed by policy",
+      { status: "ok", result: policySuppression },
+      { delivered: false, disposition: "intentional_non_delivery", terminal: true },
+    ),
     {
-      // The room's reply policy held back plain final text; it is not retried or forced out.
-      name: "message-tool room: plain final suppressed by policy",
-      response: {
-        status: "ok",
-        result: {
-          payloads: [{ text: "parent answer" }],
-          deliveryStatus: {
-            status: "suppressed",
-            reason: "message_tool_only",
-            resultCount: 0,
-          },
-        },
-      },
-      expected: { delivered: false, disposition: "intentional_non_delivery", terminal: true },
-    },
-    {
-      name: "public yielded room: plain final suppressed by policy",
+      ...settleCase(
+        "public yielded room: plain final suppressed by policy",
+        { status: "ok", result: policySuppression },
+        { delivered: false, disposition: "intentional_non_delivery", terminal: true },
+      ),
       public: true,
-      response: {
-        status: "ok",
-        result: {
-          payloads: [{ text: "parent answer" }],
-          deliveryStatus: { status: "suppressed", reason: "message_tool_only", resultCount: 0 },
-        },
-      },
-      expected: { delivered: false, disposition: "intentional_non_delivery", terminal: true },
     },
     ...[
       { error: { kind: "incomplete_turn" } },
@@ -143,27 +106,25 @@ describe("yielded private settle outcomes", () => {
       name: "policy suppression cannot settle " + Object.keys(meta)[0],
       response: {
         status: "ok",
-        result: {
-          payloads: [{ text: "partial answer" }],
-          meta,
-          deliveryStatus: { status: "suppressed", reason: "message_tool_only", resultCount: 0 },
-        },
+        result: { ...policySuppression, payloads: payloads("partial answer"), meta },
       },
-      expected: { delivered: false, reason: "visible_reply_missing" },
+      expected: missingReply,
     })),
-    {
-      name: "transferred next wave",
-      response: {
+    settleCase(
+      "transferred next wave",
+      {
         status: "ok",
         result: { payloads: [], meta: { yielded: true }, requesterContinuationSettled: true },
       },
-      expected: { delivered: true },
-    },
+      { delivered: true },
+    ),
     {
-      name: "replaced requester",
+      ...settleCase(
+        "replaced requester",
+        { status: "ok" },
+        { delivered: false, reason: "completion_handoff_unavailable", terminal: true },
+      ),
       replaced: true,
-      response: { status: "ok" },
-      expected: { delivered: false, reason: "completion_handoff_unavailable", terminal: true },
     },
   ])("requires real completion evidence: $name", async (testCase) => {
     const to = "group" in testCase ? "channel:room-1" : "dm:U123";

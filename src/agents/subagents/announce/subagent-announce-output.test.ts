@@ -10,7 +10,22 @@ import {
   dedupeLatestChildCompletionRows,
   readSubagentOutput,
 } from "./subagent-announce-output.test-support.js";
+import type { ChildCompletionRow } from "./subagent-announce-result.js";
 import { assistantCallsSessionsYield } from "./subagent-yield-output.js";
+
+const completion = (resultText: string) => ({
+  resultText,
+  terminalReply: prepareAgentRunTerminalReply({ rawText: resultText }).terminalReply,
+});
+function makeChild(overrides: Partial<ChildCompletionRow> = {}): ChildCompletionRow {
+  return {
+    childSessionKey: "agent:main:subagent:child",
+    task: "child task",
+    createdAt: 1,
+    execution: { outcome: { status: "ok" } },
+    ...overrides,
+  };
+}
 
 type CallGateway = typeof import("../../../gateway/call.js").callGateway;
 type GetRuntimeConfig = typeof import("./subagent-announce.runtime.js").getRuntimeConfig;
@@ -34,33 +49,30 @@ function installOutputDeps(params: {
   return { callGateway, readSessionMessagesAsync };
 }
 
+async function expectOutput(
+  messages: unknown[],
+  expected?: string,
+  outcome?: Parameters<typeof readSubagentOutput>[1],
+) {
+  installOutputDeps({ messages });
+  await expect(readSubagentOutput("agent:main:subagent:child", outcome)).resolves.toBe(expected);
+}
+
 function sessionsYieldTurn(message = "Waiting for subagent completion.") {
-  // sessions_yield is requester control flow, not child output; fixtures keep
-  // that wait turn adjacent to later assistant completions.
   return [
     {
       role: "assistant",
       stopReason: "toolUse",
       content: [
         { type: "text", text: message },
-        {
-          type: "toolCall",
-          id: "call-yield",
-          name: "sessions_yield",
-          arguments: { message },
-        },
+        { type: "toolCall", id: "call-yield", name: "sessions_yield", arguments: { message } },
       ],
     },
     {
       role: "toolResult",
       toolCallId: "call-yield",
       toolName: "sessions_yield",
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ status: "yielded", message }, null, 2),
-        },
-      ],
+      content: [{ type: "text", text: JSON.stringify({ status: "yielded", message }, null, 2) }],
       details: { status: "yielded", message },
     },
   ];
@@ -163,157 +175,106 @@ describe("readSubagentOutput", () => {
     });
   });
 
-  it.each([
-    {
-      shape: "top-level camelCase tool call",
-      assistant: {
-        role: "assistant",
-        content: "Waiting for child completion.",
-        toolCalls: [{ name: "sessions_yield" }],
-      },
-    },
-  ])("does not expose a $shape yield turn as completion output", async ({ assistant }) => {
+  it("does not expose a top-level camelCase tool call yield turn as completion output", async () => {
+    const assistant = {
+      role: "assistant",
+      content: "Waiting for child completion.",
+      toolCalls: [{ name: "sessions_yield" }],
+    };
     expect(assistantCallsSessionsYield(assistant)).toBe(true);
-    installOutputDeps({
-      messages: [assistant, { role: "tool", content: '{"status":"yielded"}' }],
-    });
-
-    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
+    await expectOutput([assistant, { role: "tool", content: '{"status":"yielded"}' }]);
   });
 
-  it.each(["tool_calls"])("summarizes top-level %s after a timeout", async (field) => {
-    installOutputDeps({
-      messages: [{ role: "assistant", [field]: [{ name: "read" }, { name: "exec" }] }],
-    });
-
-    await expect(
-      readSubagentOutput("agent:main:subagent:child", { status: "timeout" }),
-    ).resolves.toBe("2 tool call(s) made without visible output.");
+  it("summarizes top-level tool_calls after a timeout", async () => {
+    await expectOutput(
+      [{ role: "assistant", tool_calls: [{ name: "read" }, { name: "exec" }] }],
+      "2 tool call(s) made without visible output.",
+      { status: "timeout" },
+    );
   });
 
   it("returns final assistant output that arrives after a sessions_yield wait turn", async () => {
-    installOutputDeps({
-      messages: [
+    await expectOutput(
+      [
         ...sessionsYieldTurn(),
         {
           role: "system",
           content: [{ type: "text", text: "Compaction" }],
           __openclaw: { kind: "compaction" },
         },
-        {
-          role: "assistant",
-          stopReason: "stop",
-          content: [{ type: "text", text: "Created /tmp/final-deck.pptx" }],
-        },
+        { ...textAssistant("Created /tmp/final-deck.pptx"), stopReason: "stop" },
       ],
-    });
-
-    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBe(
       "Created /tmp/final-deck.pptx",
     );
   });
 
   it("does not reuse assistant progress that issued a trailing tool call", async () => {
-    installOutputDeps({
-      messages: [
-        textAssistant("Earlier progress is not the final answer."),
-        {
-          role: "assistant",
-          stopReason: "toolUse",
-          content: [
-            { type: "text", text: "Mapped the code path." },
-            { type: "toolCall", id: "call-read", name: "read", arguments: {} },
-          ],
-        },
-        {
-          role: "toolResult",
-          content: "tool result should not become the child result",
-        },
-      ],
-    });
-
-    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
+    await expectOutput([
+      textAssistant("Earlier progress is not the final answer."),
+      {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          { type: "text", text: "Mapped the code path." },
+          { type: "toolCall", id: "call-read", name: "read", arguments: {} },
+        ],
+      },
+      {
+        role: "toolResult",
+        content: "tool result should not become the child result",
+      },
+    ]);
   });
 
   it("does not treat a projected inter-session input as an assistant completion", async () => {
-    installOutputDeps({
-      messages: [
-        { role: "assistant", content: [{ type: "text", text: "Completed the old task." }] },
-        {
-          role: "assistant",
-          provenance: { kind: "inter_session", sourceSessionKey: "agent:main:main" },
-          content: [{ type: "text", text: "Start the next task." }],
-        },
-      ],
-    });
-
-    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
+    await expectOutput([
+      textAssistant("Completed the old task."),
+      {
+        ...textAssistant("Start the next task."),
+        provenance: { kind: "inter_session", sourceSessionKey: "agent:main:main" },
+      },
+    ]);
   });
 
   it("does not fall back to tool output when the last assistant turn is empty", async () => {
-    installOutputDeps({
-      messages: [
-        {
-          role: "toolResult",
-          content: "tool output only",
-        },
-        {
-          role: "assistant",
-          stopReason: "stop",
-          content: [],
-        },
-      ],
-    });
-
-    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
+    await expectOutput([
+      { role: "toolResult", content: "tool output only" },
+      { role: "assistant", stopReason: "stop", content: [] },
+    ]);
   });
 
   it("reads recovered output from the private SQLite transcript before gateway history", async () => {
     const deps = installOutputDeps({
       messages: [textAssistant("stale visible output")],
-      transcriptMessages: [
-        {
-          role: "assistant",
-          stopReason: "stop",
-          content: [{ type: "text", text: "fresh recovered output" }],
-        },
-      ],
+      transcriptMessages: [{ ...textAssistant("fresh recovered output"), stopReason: "stop" }],
     });
-
-    // Private transcript data is fresher for recovered runs and avoids exposing
-    // stale gateway-visible history after an internal completion is persisted.
+    const sessionTarget = {
+      agentId: "main",
+      sessionId: "child-session",
+      sessionKey: "agent:main:subagent:child",
+      storePath: "/tmp/openclaw/agents/main/sessions/sessions.json",
+    };
     await expect(
-      readSubagentOutput("agent:main:subagent:child", undefined, {
-        sessionTarget: {
-          agentId: "main",
-          sessionId: "child-session",
-          sessionKey: "agent:main:subagent:child",
-          storePath: "/tmp/openclaw/agents/main/sessions/sessions.json",
-        },
-      }),
+      readSubagentOutput(sessionTarget.sessionKey, undefined, { sessionTarget }),
     ).resolves.toBe("fresh recovered output");
-    expect(deps.readSessionMessagesAsync).toHaveBeenCalledWith(
-      {
-        agentId: "main",
-        sessionId: "child-session",
-        sessionKey: "agent:main:subagent:child",
-        storePath: "/tmp/openclaw/agents/main/sessions/sessions.json",
-      },
-      { mode: "recent", maxMessages: 100, maxBytes: 1024 * 1024 },
-    );
+    expect(deps.readSessionMessagesAsync).toHaveBeenCalledWith(sessionTarget, {
+      mode: "recent",
+      maxMessages: 100,
+      maxBytes: 1024 * 1024,
+    });
     expect(deps.callGateway).not.toHaveBeenCalled();
   });
 });
 
 describe("buildChildCompletionFindings", () => {
-  it.each(["<"])("bounds 92 large child results after escaping %s", (padding) => {
-    const children = Array.from({ length: 92 }, (_, index) => ({
-      childSessionKey: `agent:main:subagent:${String(index).padStart(2, "0")}`,
-      task: `Task ${index}`,
-      createdAt: 1,
-      announceResult: `Result ${index}: `.padEnd(11_500, padding),
-      execution: { outcome: { status: "ok" as const } },
-    }));
+  it("bounds 92 large child results after escaping <", () => {
+    const children = Array.from({ length: 92 }, (_, index) =>
+      makeChild({
+        childSessionKey: `agent:main:subagent:${String(index).padStart(2, "0")}`,
+        task: `Task ${index}`,
+        announceResult: `Result ${index}: `.padEnd(11_500, "<"),
+      }),
+    );
     const findings = buildChildCompletionFindings(children)!;
 
     expect(findings.length).toBeLessThanOrEqual(160_000);
@@ -330,13 +291,13 @@ describe("buildChildCompletionFindings", () => {
   });
 
   it("strictly bounds thousands of children with an ordered, counted overflow summary", () => {
-    const children = Array.from({ length: 5_000 }, (_, index) => ({
-      childSessionKey: `agent:main:subagent:${String(index).padStart(4, "0")}`,
-      task: `Task ${index}`,
-      createdAt: 1,
-      announceResult: `Result ${index}: `.padEnd(512, "x"),
-      execution: { outcome: { status: "ok" as const } },
-    }));
+    const children = Array.from({ length: 5_000 }, (_, index) =>
+      makeChild({
+        childSessionKey: `agent:main:subagent:${String(index).padStart(4, "0")}`,
+        task: `Task ${index}`,
+        announceResult: `Result ${index}: `.padEnd(512, "x"),
+      }),
+    );
     const findings = buildChildCompletionFindings(children)!;
     const shown = [...findings.matchAll(/\nTask (\d+)\n<\/prompt-data>/g)].map((match) =>
       Number(match[1]),
@@ -368,13 +329,13 @@ describe("buildChildCompletionFindings", () => {
 
   it("preserves a small answer beside a truncated large sibling", () => {
     const children = ["x".repeat(500_000), "small <answer> with required tail"].map(
-      (announceResult, index) => ({
-        childSessionKey: `agent:main:subagent:${index}`,
-        task: `Task ${index}`,
-        createdAt: index,
-        announceResult,
-        execution: { outcome: { status: "ok" as const } },
-      }),
+      (announceResult, index) =>
+        makeChild({
+          childSessionKey: `agent:main:subagent:${index}`,
+          task: `Task ${index}`,
+          createdAt: index,
+          announceResult,
+        }),
     );
     const findings = buildChildCompletionFindings(children)!;
 
@@ -384,49 +345,24 @@ describe("buildChildCompletionFindings", () => {
     expect(findings).toContain("\nsmall &lt;answer&gt; with required tail\n</prompt-data>");
   });
 
-  it.each([
-    {
-      name: "cancelled child with an authoritative kill reason",
-      endedReason: "subagent-killed",
-      outcome: { status: "error", error: "killed" },
-      expected: "cancelled: killed",
-    },
-  ] as const)(
-    "describes a $name in parent-visible findings",
-    ({ outcome, endedReason, expected }) => {
-      const findings = buildChildCompletionFindings([
-        {
-          childSessionKey: "agent:main:subagent:child",
-          task: "child task",
-          createdAt: 1,
-          completion: {
-            resultText: "captured findings",
-            terminalReply: { disposition: "visible", text: "captured findings" },
-          },
-          endedReason,
-          execution: { outcome },
-        },
-      ]);
-
-      expect(findings).toContain(`status: ${expected}`);
-    },
-  );
+  it("describes a cancelled child with an authoritative kill reason in parent-visible findings", () => {
+    const findings = buildChildCompletionFindings([
+      makeChild({
+        completion: completion("captured findings"),
+        endedReason: "subagent-killed",
+        execution: { outcome: { status: "error", error: "killed" } },
+      }),
+    ]);
+    expect(findings).toContain("status: cancelled: killed");
+  });
 
   it("bounds failure metadata while preserving the complete escaped child result", () => {
     const findings = buildChildCompletionFindings([
-      {
-        childSessionKey: "agent:main:subagent:child",
+      makeChild({
         label: "L".repeat(20_000),
-        task: "child task",
-        createdAt: 1,
-        completion: {
-          resultText: `${"<".repeat(2_000)}-required-tail`,
-          terminalReply: prepareAgentRunTerminalReply({
-            rawText: `${"<".repeat(2_000)}-required-tail`,
-          }).terminalReply,
-        },
+        completion: completion(`${"<".repeat(2_000)}-required-tail`),
         execution: { outcome: { status: "error", error: "E".repeat(20_000) } },
-      },
+      }),
     ]);
     const title = findings?.match(/Child task[^\n]*\n<prompt-data>\n([^\n]*)\n/)?.[1];
     const status = findings?.match(/^status: (.*)$/m)?.[1];
@@ -438,13 +374,7 @@ describe("buildChildCompletionFindings", () => {
 
   it("does not recover result text from delivery metadata after completion text is cleared", () => {
     const findings = buildChildCompletionFindings([
-      {
-        childSessionKey: "agent:main:subagent:child",
-        task: "child task",
-        createdAt: 1,
-        completion: { resultText: null },
-        execution: { outcome: { status: "ok" } },
-      },
+      makeChild({ completion: { resultText: null } }),
     ]);
 
     expect(findings).toContain("(no output)");
@@ -457,18 +387,14 @@ describe("buildChildCompletionFindings", () => {
     "does not revive fallback output for a $name completion",
     ({ status, resultText }) => {
       const findings = buildChildCompletionFindings([
-        {
-          childSessionKey: "agent:main:subagent:child",
-          task: "child task",
-          createdAt: 1,
+        makeChild({
           completion: {
+            ...completion(resultText),
             required: true,
-            terminalReply: prepareAgentRunTerminalReply({ rawText: resultText }).terminalReply,
-            resultText,
             fallbackResultText: "findings captured before the wake",
           },
           execution: { outcome: { status } },
-        },
+        }),
       ]);
 
       expect(findings).not.toContain("findings captured before the wake");
@@ -477,47 +403,36 @@ describe("buildChildCompletionFindings", () => {
     },
   );
 
-  it.each(["HEARTBEAT_OK"])(
-    "keeps %s visible without substituting fallback output",
-    (resultText) => {
-      const findings = buildChildCompletionFindings([
-        {
-          childSessionKey: "agent:main:subagent:silent",
-          task: "silent task",
-          createdAt: 1,
-          completion: {
-            resultText,
-            terminalReply: prepareAgentRunTerminalReply({ rawText: resultText }).terminalReply,
-            fallbackResultText: "stale findings",
-          },
-          execution: { outcome: { status: "ok" } },
+  it("keeps HEARTBEAT_OK visible without substituting fallback output", () => {
+    const resultText = "HEARTBEAT_OK";
+    const findings = buildChildCompletionFindings([
+      makeChild({
+        childSessionKey: "agent:main:subagent:silent",
+        task: "silent task",
+        completion: {
+          ...completion(resultText),
+          fallbackResultText: "stale findings",
         },
-      ]);
+      }),
+    ]);
 
-      expect(findings).toContain(resultText);
-      expect(findings).not.toContain("stale findings");
-    },
-  );
+    expect(findings).toContain(resultText);
+    expect(findings).not.toContain("stale findings");
+  });
 
   it("numbers findings contiguously after skipped silent completions", () => {
     const findings = buildChildCompletionFindings([
-      {
+      makeChild({
         childSessionKey: "agent:main:subagent:silent",
         task: "silent task",
-        createdAt: 1,
         completion: { terminalReply: { disposition: "silent" } },
-        execution: { outcome: { status: "ok" } },
-      },
-      {
+      }),
+      makeChild({
         childSessionKey: "agent:main:subagent:visible",
         task: "visible task",
         createdAt: 2,
-        completion: {
-          resultText: "actual output",
-          terminalReply: { disposition: "visible", text: "actual output" },
-        },
-        execution: { outcome: { status: "ok" } },
-      },
+        completion: completion("actual output"),
+      }),
     ]);
 
     expect(findings).toMatch(/1\. Child task[^\n]*\n<prompt-data>\nvisible task\n/);
@@ -525,24 +440,18 @@ describe("buildChildCompletionFindings", () => {
   });
 
   it("orders same-timestamp child completions by stable session identity", () => {
-    const laterKey = {
+    const laterKey = makeChild({
       childSessionKey: "agent:main:subagent:z",
       task: "Z task",
       createdAt: 1_000,
-      completion: {
-        resultText: "Z result",
-        terminalReply: prepareAgentRunTerminalReply({ rawText: "Z result" }).terminalReply,
-      },
+      completion: completion("Z result"),
       execution: { endedAt: 2_000, outcome: { status: "ok" as const } },
-    };
+    });
     const earlierKey = {
       ...laterKey,
       childSessionKey: "agent:main:subagent:a",
       task: "A task",
-      completion: {
-        resultText: "A result",
-        terminalReply: prepareAgentRunTerminalReply({ rawText: "A result" }).terminalReply,
-      },
+      completion: completion("A result"),
     };
 
     const forward = buildChildCompletionFindings([laterKey, earlierKey]);
