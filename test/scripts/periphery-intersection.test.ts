@@ -19,8 +19,6 @@ const FINDING_SOURCE = "../shared/OpenClawKit/Sources/OpenClawKit/Example.swift"
 type WorkflowStep = {
   id?: string;
   name?: string;
-  run?: string;
-  if?: string;
   with?: { name?: string; overwrite?: boolean; path?: string; script?: string };
 };
 
@@ -30,7 +28,6 @@ type Workflow = {
     {
       name?: string;
       needs?: string[] | string;
-      "runs-on"?: string;
       steps?: WorkflowStep[];
     }
   >;
@@ -115,44 +112,30 @@ describe("Periphery intersection", () => {
 
 describe("shared OpenClawKit Periphery workflow", () => {
   const workflow = parse(readFileSync(WORKFLOW_PATH, "utf8")) as Workflow;
+  const artifact = (job: string, name: string) =>
+    workflow.jobs?.[job]?.steps?.find((step) => step.name === name)?.with;
 
   it("runs two consumer scans and a same-run intersection", () => {
     expect(workflow.jobs?.["scan-ios"]?.name).toBe("Scan shared kit from iOS");
     expect(workflow.jobs?.["scan-macos"]?.name).toBe("Scan shared kit from macOS");
     expect(workflow.jobs?.intersect?.needs).toEqual(["scope", "scan-ios", "scan-macos"]);
 
-    const iosUpload = workflow.jobs?.["scan-ios"]?.steps?.find(
-      (step) => step.name === "Upload iOS consumer report",
-    );
-    const macosUpload = workflow.jobs?.["macos-index"]?.steps?.find(
-      (step) => step.name === "Upload macOS consumer report",
-    );
-    const iosDownload = workflow.jobs?.intersect?.steps?.find(
-      (step) => step.name === "Download iOS consumer report",
-    );
-    const macosDownload = workflow.jobs?.intersect?.steps?.find(
-      (step) => step.name === "Download macOS consumer report",
-    );
-    const intersectionUpload = workflow.jobs?.intersect?.steps?.find(
-      (step) => step.name === "Upload shared intersection",
-    );
-
-    expect(iosUpload?.with?.name).toBe(
+    expect(artifact("scan-ios", "Upload iOS consumer report")?.name).toBe(
       "shared-periphery-ios-${{ github.run_id }}-${{ github.run_attempt }}",
     );
-    expect(macosUpload?.with?.name).toBe(
+    expect(artifact("macos-index", "Upload macOS consumer report")?.name).toBe(
       "shared-periphery-macos-${{ github.run_id }}-${{ github.run_attempt }}",
     );
-    expect(iosDownload?.with?.name).toBe(
+    expect(artifact("intersect", "Download iOS consumer report")?.name).toBe(
       "shared-periphery-ios-${{ github.run_id }}-${{ steps.producers.outputs.ios-attempt }}",
     );
-    expect(macosDownload?.with?.name).toBe(
+    expect(artifact("intersect", "Download macOS consumer report")?.name).toBe(
       "shared-periphery-macos-${{ github.run_id }}-${{ steps.producers.outputs.macos-attempt }}",
     );
-    expect(intersectionUpload?.with?.name).toBe(
-      "shared-periphery-intersection-${{ github.run_id }}",
-    );
-    expect(intersectionUpload?.with?.overwrite).toBe(true);
+    expect(artifact("intersect", "Upload shared intersection")).toMatchObject({
+      name: "shared-periphery-intersection-${{ github.run_id }}",
+      overwrite: true,
+    });
   });
 });
 

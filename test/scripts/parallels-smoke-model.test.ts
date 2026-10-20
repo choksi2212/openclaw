@@ -1,5 +1,4 @@
-// Parallels Smoke Model tests cover parallels smoke model script behavior.
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   chmodSync,
@@ -326,6 +325,29 @@ function runNode(source: string, options: NonNullable<Parameters<typeof run>[2]>
   return run(testNodeExecPath, ["-e", source], options);
 }
 
+function runWindowsPrepare(
+  script: string,
+  args: string[] = [],
+  options: Pick<SpawnSyncOptions, "env" | "timeout"> = {},
+) {
+  return spawnSync("bash", ["-c", script, "bash", WINDOWS_PREPARE_WRAPPER, ...args], {
+    encoding: "utf8",
+    ...options,
+  });
+}
+
+function runWindowsBackground(
+  options: Pick<Parameters<typeof runWindowsBackgroundPowerShell>[0], "runCommand" | "label"> &
+    Partial<Parameters<typeof runWindowsBackgroundPowerShell>[0]>,
+) {
+  return runWindowsBackgroundPowerShell({
+    script: "Write-Output ok",
+    timeoutMs: 720_000,
+    vmName: "Windows 11",
+    ...options,
+  });
+}
+
 type FakeCommandResult = { status: number; stderr: string; stdout: string };
 type FakePosixBackgroundOptions = {
   done?: FakeCommandResult;
@@ -466,6 +488,24 @@ if (fs.readFileSync(owner, 'utf8') === String(process.pid)) {
 `,
   );
   return preload;
+}
+
+function deadlineFixture(prefix: string, timeoutMs = 200) {
+  const tempDir = makeTempDir(tempDirs, prefix);
+  const grandchildPidPath = join(tempDir, "grandchild.pid");
+  const deadlineFile = join(tempDir, "deadline");
+  const preload = writeDrainDeadlinePreload(tempDir, timeoutMs);
+  return {
+    tempDir,
+    grandchildPidPath,
+    deadlineFile,
+    env: {
+      ...process.env,
+      READY_FILE: grandchildPidPath,
+      DEADLINE_FILE: deadlineFile,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preload)}`,
+    },
+  };
 }
 
 const SIGNAL_GRANDCHILD_SCRIPT = `
@@ -630,11 +670,8 @@ describe("Parallels smoke model selection", () => {
   ])(
     "%s enforces the Windows Node contract from %s after installation of %s",
     (command, initialVersion, installedVersion, installs, exitCode) => {
-      const result = spawnSync(
-        "bash",
-        [
-          "-c",
-          `set -euo pipefail
+      const result = runWindowsPrepare(
+        `set -euo pipefail
 OPENCLAW_PARALLELS_WINDOWS_LIBRARY_ONLY=1 source "$1"
 guest_version="$3"
 guest_user_cmd() {
@@ -659,13 +696,8 @@ installed_version="$4"
 run_windows_installer() { printf 'installed-node\\n'; guest_version="$installed_version"; }
 "$2"
 printf 'verified-node=%s\\n' "$guest_version"`,
-          "bash",
-          WINDOWS_PREPARE_WRAPPER,
-          command,
-          initialVersion,
-          installedVersion,
-        ],
-        { encoding: "utf8", timeout: 10_000 },
+        [command, initialVersion, installedVersion],
+        { timeout: 10_000 },
       );
 
       expect(result.status, result.stderr).toBe(exitCode);
@@ -685,20 +717,15 @@ printf 'verified-node=%s\\n' "$guest_version"`,
     const tempDir = makeTempDir(tempDirs, "openclaw-windows-restore-");
     const statePath = join(tempDir, "state");
     writeFileSync(statePath, "restoring");
-    const result = spawnSync(
-      "bash",
-      [
-        "-c",
-        `set -euo pipefail
+    const result = runWindowsPrepare(
+      `set -euo pipefail
 OPENCLAW_PARALLELS_WINDOWS_LIBRARY_ONLY=1 source "$1"
 vm_state() { cat "$VM_STATE_FILE"; }
 sleep() { printf stopped >"$VM_STATE_FILE"; }
 run_bounded() { printf 'invoked=%s\\n' "$*"; }
 ensure_vm_running`,
-        "bash",
-        WINDOWS_PREPARE_WRAPPER,
-      ],
-      { encoding: "utf8", env: { ...process.env, VM_STATE_FILE: statePath }, timeout: 10_000 },
+      [],
+      { env: { ...process.env, VM_STATE_FILE: statePath }, timeout: 10_000 },
     );
 
     expect(result.status, result.stderr).toBe(0);
@@ -907,15 +934,8 @@ ensure_vm_running`,
   });
 
   it("bounds Windows prerequisite metadata downloads", () => {
-    const result = spawnSync(
-      "bash",
-      [
-        "-c",
-        'OPENCLAW_PARALLELS_WINDOWS_LIBRARY_ONLY=1 source "$1"; curl() { printf "%s\\n" "$@"; }; fetch_host_metadata "https://example.test/metadata"',
-        "bash",
-        WINDOWS_PREPARE_WRAPPER,
-      ],
-      { encoding: "utf8" },
+    const result = runWindowsPrepare(
+      'OPENCLAW_PARALLELS_WINDOWS_LIBRARY_ONLY=1 source "$1"; curl() { printf "%s\\n" "$@"; }; fetch_host_metadata "https://example.test/metadata"',
     );
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim().split("\n")).toEqual([
@@ -936,15 +956,10 @@ ensure_vm_running`,
     const tempDir = makeTempDir(tempDirs, "openclaw-windows-metadata-retry-");
     const callCount = join(tempDir, "curl-calls");
     writeFileSync(callCount, "0\n");
-    const retryResult = spawnSync(
-      "bash",
-      [
-        "-c",
-        `OPENCLAW_PARALLELS_WINDOWS_LIBRARY_ONLY=1 source "$1"; curl() { count="$(<"$CURL_CALL_COUNT")"; count=$((count + 1)); printf '%s\\n' "$count" >"$CURL_CALL_COUNT"; if [[ "$count" == "1" ]]; then printf 'partial-'; return 28; fi; printf 'complete'; }; sleep() { :; }; fetch_host_metadata "https://example.test/metadata"`,
-        "bash",
-        WINDOWS_PREPARE_WRAPPER,
-      ],
-      { encoding: "utf8", env: { ...process.env, CURL_CALL_COUNT: callCount } },
+    const retryResult = runWindowsPrepare(
+      `OPENCLAW_PARALLELS_WINDOWS_LIBRARY_ONLY=1 source "$1"; curl() { count="$(<"$CURL_CALL_COUNT")"; count=$((count + 1)); printf '%s\\n' "$count" >"$CURL_CALL_COUNT"; if [[ "$count" == "1" ]]; then printf 'partial-'; return 28; fi; printf 'complete'; }; sleep() { :; }; fetch_host_metadata "https://example.test/metadata"`,
+      [],
+      { env: { ...process.env, CURL_CALL_COUNT: callCount } },
     );
     expect(retryResult.status, retryResult.stderr).toBe(0);
     expect(retryResult.stdout).toBe("complete");
@@ -1087,9 +1102,9 @@ ensure_vm_running`,
       modelId: "openai/gpt-5.6-luna",
     });
 
+    expect(script).not.toContain("'openclaw-parallels-plugin-isolation.cjs'");
     expect(script).toContain("[guid]::NewGuid().ToString('N')");
     expect(script).toContain("openclaw-parallels-plugin-isolation-");
-    expect(script).not.toContain("'openclaw-parallels-plugin-isolation.cjs'");
     expect(script).toContain("try {");
     expect(script).toContain("} finally {");
     expect(script).toContain(
@@ -1763,19 +1778,23 @@ if (commandArgs[0] === "list") {
       );
     }
     expect(smokeCommon).toContain("finalAssistant(Raw|Visible)Text");
-    expect(macos).toContain("modelProviderConfigBatchJson");
-    expect(macos).toContain("config set --batch-file");
-    expect(linux).toContain("modelProviderConfigBatchJson");
-    expect(linux).toContain("config set --batch-file");
+    for (const source of [macos, linux]) {
+      expect(source).toContain("modelProviderConfigBatchJson");
+      expect(source).toContain("config set --batch-file");
+    }
     expect(windows).toContain("windowsAgentTurnConfigPatchScript");
     expect(powershell).toContain("agents.defaults.skipBootstrap");
     expect(powershell).toContain("tools.profile");
     expect(powershell).toContain("replace(/^\\\\uFEFF/u");
-
     expect(npmUpdateScripts).toContain("posixAgentWorkspaceScript");
     expect(npmUpdateScripts).toContain("windowsAgentWorkspaceScript");
     expect(npmUpdateScripts).toContain("tools.profile");
     expect(npmUpdateScripts).toContain("--thinking off");
+    expect(npmUpdateScripts).toContain("posixAssertAgentOkScript");
+    expect(npmUpdateScripts).toContain("posixAgentTurnScript({");
+    expect(npmUpdateScripts).toContain("windowsAgentTurnConfigPatchScript");
+    expect(npmUpdateScripts).toContain("modelProviderConfigBatchJson");
+    expect(npmUpdateScripts).toContain("config set --batch-file");
     expect(
       windowsAgentTurnScript({
         command: "Invoke-OpenClaw @args",
@@ -1783,11 +1802,6 @@ if (commandArgs[0] === "list") {
         retryOnCommandFailure: false,
       }),
     ).toContain("finalAssistant(Raw|Visible)Text");
-    expect(npmUpdateScripts).toContain("posixAssertAgentOkScript");
-    expect(npmUpdateScripts).toContain("posixAgentTurnScript({");
-    expect(npmUpdateScripts).toContain("windowsAgentTurnConfigPatchScript");
-    expect(npmUpdateScripts).toContain("modelProviderConfigBatchJson");
-    expect(npmUpdateScripts).toContain("config set --batch-file");
   });
 
   it("clears phase timers and applies phase deadlines to guest commands", () => {
@@ -1935,6 +1949,8 @@ if (commandArgs[0] === "list") {
     expect(windows).toContain("ensureGuestGit");
     expect(windows).toContain("fresh.ensure-git");
     expect(windows).toContain("upgrade.ensure-git");
+    expect(windows).toContain("Invoke-RestMethod -Uri");
+    expect(windows).toContain("-TimeoutSec 120");
     expect(combined).toContain("MinGit-");
     expect(combined).toContain("portable-git");
     expect(combined).toContain("where.exe git.exe");
@@ -1944,8 +1960,6 @@ if (commandArgs[0] === "list") {
     expect(
       combined.match(/curl\.exe -fsSL --connect-timeout 10 --max-time 120 --retry 2/g),
     ).toHaveLength(2);
-    expect(windows).toContain("Invoke-RestMethod -Uri");
-    expect(windows).toContain("-TimeoutSec 120");
     expect(windowsGit).toContain('if "-64-bit." in name:');
     expect(windowsGit).toContain('elif "-arm64." in name:');
   });
@@ -2076,15 +2090,14 @@ if (commandArgs[0] === "list") {
     let uploadedScript = "";
     const runCommand = (_command: string, _args: string[], options?: { input?: string }) => {
       uploadedScript = options?.input ?? "";
-      return { status: 1, stderr: "fixture upload failure", stdout: "" };
+      return fakeResult(1, "", "fixture upload failure");
     };
     await expect(
-      runWindowsBackgroundPowerShell({
+      runWindowsBackground({
         env: { NPM_CONFIG_REGISTRY: "http://192.0.2.2:48123/candidate's" },
         label: "environment proof",
         runCommand,
         script: "Write-Output $env:NPM_CONFIG_REGISTRY",
-        timeoutMs: 720_000,
         vmName: "Windows VM",
       }),
     ).rejects.toThrow("background script write failed");
@@ -2097,17 +2110,15 @@ if (commandArgs[0] === "list") {
     let calls = 0;
     const runCommand = vi.fn(() => {
       calls++;
-      return { status: 0, stderr: "", stdout: "" };
+      return fakeResult();
     });
 
     await expect(
-      runWindowsBackgroundPowerShell({
+      runWindowsBackground({
         label: "ambiguous launch",
         pollIntervalMs: 20,
         runCommand,
-        script: "Write-Output ok",
         timeoutMs: 90,
-        vmName: "Windows 11",
       }),
     ).rejects.toThrow("ambiguous launch background launch failed");
 
@@ -2115,20 +2126,18 @@ if (commandArgs[0] === "list") {
   });
 
   it("fails fast when a Windows Parallels VM stops during background work", async () => {
-    const runCommand = vi.fn(() => ({
-      status: 1,
-      stderr:
+    const runCommand = vi.fn(() =>
+      fakeResult(
+        1,
+        "",
         'Unable to perform the operation because "Windows 11" is not started. This operation can be performed for running virtual machines only.',
-      stdout: "",
-    }));
+      ),
+    );
 
     await expect(
-      runWindowsBackgroundPowerShell({
+      runWindowsBackground({
         label: "ref-onboard",
         runCommand,
-        script: "Write-Output ok",
-        timeoutMs: 720_000,
-        vmName: "Windows 11",
       }),
     ).rejects.toThrow("ref-onboard failed: Parallels VM stopped");
 
@@ -2141,27 +2150,24 @@ if (commandArgs[0] === "list") {
     const runCommand = vi.fn((_command: string, args: string[], options?: { input?: string }) => {
       const command = args.at(-1) ?? "";
       if (options?.input) {
-        return { status: 0, stderr: "", stdout: "" };
+        return fakeResult();
       }
       if (args.includes("--current-user")) {
-        return { status: 0, stderr: "", stdout: "started\n" };
+        return fakeResult(0, "started\n");
       }
       if (args.includes("cmd.exe") && command.includes("echo wait")) {
         donePolls++;
-        return { status: 124, stderr: "", stdout: "" };
+        return fakeResult(124);
       }
-      return { status: 0, stderr: "", stdout: "" };
+      return fakeResult();
     });
 
     await expect(
-      runWindowsBackgroundPowerShell({
+      runWindowsBackground({
         label: "ref-onboard",
         onLaunchRetry: (message) => retries.push(message),
         pollIntervalMs: 1,
         runCommand,
-        script: "Write-Output ok",
-        timeoutMs: 720_000,
-        vmName: "Windows 11",
       }),
     ).rejects.toThrow("ref-onboard done poll failed after 3 consecutive guest transport errors");
 
@@ -2192,22 +2198,19 @@ if (commandArgs[0] === "list") {
   it.runIf(process.platform !== "win32")(
     "lets timed host command descendants drain before force kill",
     () => {
-      const tempDir = makeTempDir(tempDirs, "openclaw-parallels-host-command-drain-");
+      const fixture = deadlineFixture("openclaw-parallels-host-command-drain-", 100);
+      const { tempDir, deadlineFile } = fixture;
       const readyFile = join(tempDir, "ready");
       const drainFile = join(tempDir, "drained");
-      const deadlineFile = join(tempDir, "deadline");
-      const preload = writeDrainDeadlinePreload(tempDir);
 
       // Force descendant startup past the deadline, then release the real timeout
       // callback only after signal handlers are installed. Cleanup timers stay real.
       const result = runNode(drainableProcessTreeScript(25), {
         check: false,
         env: {
-          ...process.env,
+          ...fixture.env,
           DRAIN_FILE: drainFile,
           READY_FILE: readyFile,
-          DEADLINE_FILE: deadlineFile,
-          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preload)}`,
         },
         timeoutMs: 100,
       });
@@ -2228,22 +2231,17 @@ if (commandArgs[0] === "list") {
   it.runIf(process.platform !== "win32")(
     "kills timed-out host command process groups",
     async ({ signal }) => {
-      const tempDir = makeTempDir(tempDirs, "openclaw-parallels-host-command-");
-      const grandchildPidPath = join(tempDir, "grandchild.pid");
-      const deadlineFile = join(tempDir, "deadline");
-      const preload = writeDrainDeadlinePreload(tempDir, 200);
+      const fixture = deadlineFixture("openclaw-parallels-host-command-");
+      const { tempDir, grandchildPidPath, deadlineFile } = fixture;
       let grandchildPid = 0;
 
       try {
         const result = runNode(SIGNAL_PARENT_SCRIPT, {
           check: false,
           env: {
-            ...process.env,
+            ...fixture.env,
             OPENCLAW_TEST_GRANDCHILD_PID: grandchildPidPath,
             OPENCLAW_TEST_READY_FILE: join(tempDir, "ready"),
-            READY_FILE: grandchildPidPath,
-            DEADLINE_FILE: deadlineFile,
-            NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preload)}`,
           },
           timeoutMs: 200,
         });
@@ -2264,10 +2262,8 @@ if (commandArgs[0] === "list") {
   it.runIf(process.platform !== "win32")(
     "settles timed host commands when an escaped descendant retains child pipes",
     () => {
-      const tempDir = makeTempDir(tempDirs, "openclaw-parallels-host-command-pipes-");
-      const grandchildPidPath = join(tempDir, "grandchild.pid");
-      const deadlineFile = join(tempDir, "deadline");
-      const preload = writeDrainDeadlinePreload(tempDir, 200);
+      const fixture = deadlineFixture("openclaw-parallels-host-command-pipes-");
+      const { grandchildPidPath, deadlineFile } = fixture;
       let grandchildPid = 0;
       // Outlive the assertion bound, but self-clean if PID setup fails.
       const grandchildScript = "setTimeout(() => process.exit(0), 3_000);";
@@ -2291,11 +2287,8 @@ if (commandArgs[0] === "list") {
         const result = run(testNodeExecPath, ["-e", parentScript], {
           check: false,
           env: {
-            ...process.env,
+            ...fixture.env,
             GRANDCHILD_PID_PATH: grandchildPidPath,
-            READY_FILE: grandchildPidPath,
-            DEADLINE_FILE: deadlineFile,
-            NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preload)}`,
           },
           // Let the command spawn its pipe holder before exercising timeout settlement.
           timeoutMs: 200,
@@ -2534,69 +2527,53 @@ if (commandArgs[0] === "list") {
     );
   });
 
+  const targetSha = "a".repeat(40);
+  const devStatus = '"installKind": "git", "value": "dev"';
+  const pinnedStatus = `${devStatus}, "branch": "HEAD"`;
+  function devCase(
+    name: string,
+    options: {
+      status?: string;
+      target?: string;
+      head?: string;
+      reads?: number;
+      error?: string;
+    },
+  ) {
+    return { name, status: pinnedStatus, target: targetSha, head: "", reads: 0, ...options };
+  }
   it.each([
-    {
-      name: "unpinned main",
-      status: '"installKind": "git", "value": "dev", "branch": "main"',
-      target: undefined,
-      head: "",
-      reads: 0,
-    },
-    {
-      name: "pinned HEAD with banner and CRLF",
-      status: '"installKind": "git", "value": "dev", "branch": "HEAD"',
-      target: "a".repeat(40),
-      head: `checkout banner\r\n${"a".repeat(40)}\r\n`,
+    devCase("unpinned main", { status: `${devStatus}, "branch": "main"`, target: undefined }),
+    devCase("pinned HEAD with banner and CRLF", {
+      head: `checkout banner\r\n${targetSha}\r\n`,
       reads: 1,
-    },
-    {
-      name: "missing install kind before all other checks",
+    }),
+    devCase("missing install kind before all other checks", {
       status: "",
-      target: "a".repeat(40),
-      head: "",
-      reads: 0,
       error: 'dev update status missing "installKind": "git"',
-    },
-    {
-      name: "missing dev channel before branch and checkout",
+    }),
+    devCase("missing dev channel before branch and checkout", {
       status: '"installKind": "git"',
-      target: "a".repeat(40),
-      head: "",
-      reads: 0,
       error: 'dev update status missing "value": "dev"',
-    },
-    {
-      name: "missing pinned branch before checkout",
-      status: '"installKind": "git", "value": "dev"',
-      target: "a".repeat(40),
-      head: "",
-      reads: 0,
+    }),
+    devCase("missing pinned branch before checkout", {
+      status: devStatus,
       error: 'dev update status missing "branch": "HEAD"',
-    },
-    {
-      name: "wrong unpinned branch",
-      status: '"installKind": "git", "value": "dev", "branch": "HEAD"',
+    }),
+    devCase("wrong unpinned branch", {
       target: undefined,
-      head: "",
-      reads: 0,
       error: 'dev update status missing "branch": "main"',
-    },
-    {
-      name: "empty pinned checkout",
-      status: '"installKind": "git", "value": "dev", "branch": "HEAD"',
-      target: "a".repeat(40),
+    }),
+    devCase("empty pinned checkout", {
       head: "\r\n",
       reads: 1,
-      error: `dev update checkout head <empty> did not match ${"a".repeat(40)}`,
-    },
-    {
-      name: "mismatching pinned checkout",
-      status: '"installKind": "git", "value": "dev", "branch": "HEAD"',
-      target: "a".repeat(40),
+      error: `dev update checkout head <empty> did not match ${targetSha}`,
+    }),
+    devCase("mismatching pinned checkout", {
       head: "b".repeat(40),
       reads: 1,
-      error: `dev update checkout head ${"b".repeat(40)} did not match ${"a".repeat(40)}`,
-    },
+      error: `dev update checkout head ${"b".repeat(40)} did not match ${targetSha}`,
+    }),
   ])("validates dev updates: $name", ({ status, target, head, reads, error }) => {
     const readCheckoutHead = vi.fn(() => head);
     const verify = () => assertDevChannelUpdate(status, target, readCheckoutHead);

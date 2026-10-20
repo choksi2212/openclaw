@@ -1,4 +1,3 @@
-// Parallels Update Job Timeout tests cover parallels update job timeout script behavior.
 import { spawnSync } from "node:child_process";
 import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,24 +9,24 @@ import {
 } from "../../src/infra/runtime-worker-url.js";
 
 describe("Parallels update job timeout", () => {
+  const runJob = (options: Partial<Parameters<typeof runTimedUpdateJob>[0]>) =>
+    runTimedUpdateJob({
+      append: () => undefined,
+      label: "macOS",
+      run: async () => undefined,
+      timeoutDescription: "1s plus cleanup backstop",
+      timeoutMs: 1000,
+      ...options,
+    });
   afterEach(() => {
     vi.useRealTimers();
   });
 
   it("clamps oversized update job timers before scheduling", async () => {
-    const chunks: string[] = [];
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 
     try {
-      await expect(
-        runTimedUpdateJob({
-          append: (chunk) => chunks.push(chunk),
-          label: "Linux",
-          run: async () => undefined,
-          timeoutDescription: "oversized",
-          timeoutMs: Number.MAX_SAFE_INTEGER,
-        }),
-      ).resolves.toBe(0);
+      await expect(runJob({ timeoutMs: Number.MAX_SAFE_INTEGER })).resolves.toBe(0);
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), MAX_TIMER_TIMEOUT_MS);
     } finally {
       setTimeoutSpy.mockRestore();
@@ -38,14 +37,11 @@ describe("Parallels update job timeout", () => {
     const chunks: string[] = [];
 
     await expect(
-      runTimedUpdateJob({
+      runJob({
         append: (chunk) => chunks.push(chunk),
-        label: "Linux",
         run: async () => {
           throw new Error("package swap failed");
         },
-        timeoutDescription: "1s",
-        timeoutMs: 1000,
       }),
     ).resolves.toBe(1);
 
@@ -56,14 +52,12 @@ describe("Parallels update job timeout", () => {
     vi.useFakeTimers();
     const chunks: string[] = [];
 
-    const result = runTimedUpdateJob({
+    const result = runJob({
       append: (chunk) => chunks.push(chunk),
-      label: "macOS",
       run: () =>
         new Promise<void>((resolve) => {
           setTimeout(resolve, 1000);
         }),
-      timeoutDescription: "1s plus cleanup backstop",
       timeoutMs: 1200,
     });
 
@@ -76,10 +70,9 @@ describe("Parallels update job timeout", () => {
     vi.useFakeTimers();
     const events: string[] = [];
 
-    const result = runTimedUpdateJob({
+    const result = runJob({
       abortSettleMs: 250,
       append: (chunk) => events.push(chunk.trim()),
-      label: "macOS",
       run: ({ signal }) =>
         new Promise<void>((resolve) => {
           signal.addEventListener(
@@ -94,8 +87,6 @@ describe("Parallels update job timeout", () => {
             { once: true },
           );
         }),
-      timeoutDescription: "1s plus cleanup backstop",
-      timeoutMs: 1000,
     }).then((code) => {
       events.push("complete");
       return code;
