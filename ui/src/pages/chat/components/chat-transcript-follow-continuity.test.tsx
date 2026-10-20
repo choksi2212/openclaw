@@ -8,13 +8,16 @@ import { lockChatScroll } from "../scroll.ts";
 import { mountTestTranscript } from "../test-helpers/chat-transcript-native.tsx";
 import { createChatTranscript } from "./chat-transcript-controller.ts";
 import {
+  contentRows,
+  emitTranscriptResize,
+  setTranscriptViewport,
+} from "./chat-transcript-fixture.test-support.tsx";
+import {
   flushDeferredRowPrune,
   installTranscriptDomMocks,
   resetTranscriptTestDom,
-  resizeObservers,
   transcriptDomState,
   transcriptSize,
-  type TestContentRow,
 } from "./chat-transcript.test-support.ts";
 
 describe("transcript follow continuity", () => {
@@ -24,19 +27,12 @@ describe("transcript follow continuity", () => {
   it("remeasures skipped rows when automatic follow replaces smooth scrolling", async () => {
     const flushFrames = stubAnimationFrames();
     transcriptDomState.measuredRowHeight = 120;
-    const rows: TestContentRow[] = Array.from({ length: 40 }, (_, index) => ({
-      kind: "content",
-      key: "row:" + index,
-      content: <div>row {index}</div>,
-    }));
+    const rows = contentRows(40);
     const { container, transcript, renderRows } = await mountTestTranscript(
       "follow-remeasure",
       rows,
     );
-    Object.defineProperties(container, {
-      clientHeight: { configurable: true, value: 600 },
-      scrollHeight: { configurable: true, value: 4800 },
-    });
+    setTranscriptViewport(container, 4800);
     container.scrollTop = 2400;
     container.dispatchEvent(new Event("scroll"));
     renderRows(rows);
@@ -52,9 +48,7 @@ describe("transcript follow continuity", () => {
       transcript.scrollToEnd({ source: "auto", behavior: "smooth" });
       row.style.height = "180px";
       // TanStack suppresses ResizeObserver deliveries outside the smooth target's buffer.
-      for (const observer of resizeObservers) {
-        observer.emitTarget(row, 800, 180);
-      }
+      emitTranscriptResize(row, 800, 180);
       renderRows(rows);
       expect(transcriptSize(container)).toBe(before);
 
@@ -79,21 +73,14 @@ describe("transcript follow continuity", () => {
           followEnabled = false;
         },
       });
-      const rows: TestContentRow[] = Array.from({ length: 40 }, (_, index) => ({
-        kind: "content",
-        key: "row:" + index,
-        content: <div>row {index}</div>,
-      }));
+      const rows = contentRows(40);
       const { container, session, renderRows } = await mountTestTranscript(
         "smooth-no-op",
         rows,
         transcript,
       );
       let scrollHeight = 4800;
-      Object.defineProperties(container, {
-        clientHeight: { configurable: true, value: 600 },
-        scrollHeight: { configurable: true, get: () => scrollHeight },
-      });
+      setTranscriptViewport(container, () => scrollHeight);
       const scrollTo = vi.fn((options?: ScrollToOptions | number) => {
         if (typeof options === "object" && options.top !== undefined) {
           const previous = container.scrollTop;
@@ -137,9 +124,7 @@ describe("transcript follow continuity", () => {
           "measured final row",
         );
         lastRow.style.height = "155px";
-        for (const observer of resizeObservers) {
-          observer.emitTarget(lastRow, 800, 155);
-        }
+        emitTranscriptResize(lastRow, 800, 155);
         scrollHeight += 35;
         renderRows(rows);
         flushFrames();
@@ -167,16 +152,9 @@ describe("transcript follow continuity", () => {
       Object.assign(policy, {
         chatCancelScroll: () => transcript.cancelScroll(),
       });
-      const rows: TestContentRow[] = Array.from({ length: 40 }, (_, index) => ({
-        kind: "content",
-        key: "row:" + index,
-        content: <div>row {index}</div>,
-      }));
+      const rows = contentRows(40);
       const { container } = await mountTestTranscript("follow-continuity", rows, transcript);
-      Object.defineProperties(container, {
-        clientHeight: { configurable: true, value: 600 },
-        scrollHeight: { configurable: true, value: 4800 },
-      });
+      setTranscriptViewport(container, 4800);
       container.scrollTop = 1000;
       const writes: ScrollToOptions[] = [];
       container.scrollTo = (options?: ScrollToOptions | number) => {
@@ -213,11 +191,7 @@ describe("transcript follow continuity", () => {
     "follows typing growth only from the resting end ($distance, $followEnabled, native movement pending=$nativePending)",
     async ({ distance, followEnabled, nativePending }) => {
       const flushFrames = stubAnimationFrames();
-      const rows: TestContentRow[] = Array.from({ length: 12 }, (_, index) => ({
-        kind: "content",
-        key: "row:" + index,
-        content: <div>row {index}</div>,
-      }));
+      const rows = contentRows(12);
       const { container, renderRows, transcript } = await mountTestTranscript(
         `typing-distance-${distance}`,
         rows,
@@ -228,13 +202,8 @@ describe("transcript follow continuity", () => {
       try {
         const padding = nativePending ? 88 : 84;
         let scrollHeight = transcriptSize(container) + padding;
-        Object.defineProperties(container, {
-          clientHeight: { configurable: true, value: 600 },
-          scrollHeight: { configurable: true, get: () => scrollHeight },
-        });
-        for (const observer of resizeObservers) {
-          observer.emitTarget(container, 800, 600);
-        }
+        setTranscriptViewport(container, () => scrollHeight);
+        emitTranscriptResize(container, 800, 600);
         // Measure the initial range before isolating the typing row's growth.
         container.scrollTop = 0;
         container.dispatchEvent(new Event("scroll"));

@@ -9,17 +9,7 @@ import {
 import { TranscriptPrependAnchor } from "./chat-transcript-prepend-anchor.ts";
 
 function rect(top: number, height: number): DOMRect {
-  return {
-    top,
-    bottom: top + height,
-    height,
-    width: 800,
-    left: 0,
-    right: 800,
-    x: 0,
-    y: top,
-    toJSON: () => ({}),
-  };
+  return new DOMRect(0, top, 800, height);
 }
 
 function fixture(scrollHeight = 1600) {

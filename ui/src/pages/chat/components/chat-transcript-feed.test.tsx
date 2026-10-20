@@ -16,6 +16,9 @@ function toolCall(id: string, name: string, args: unknown) {
   return { type: "toolCall", id, name, arguments: args };
 }
 
+const assistant = (...content: unknown[]) => ({ role: "assistant", content });
+const text = (value: string) => ({ type: "text", text: value });
+
 function toolResult(toolCallId: string, isError = false) {
   return {
     role: "toolResult",
@@ -108,16 +111,13 @@ describe("chat transcript feed", () => {
       },
       toolResult("read-1"),
       { role: "assistant", content: "The next step is the layout fix." },
-      {
-        role: "assistant",
-        content: [
-          toolCall("edit-1", "edit", {
-            path: "ui/src/styles/chat/sidebar.css",
-            oldText: "display: flex",
-            newText: "display: grid",
-          }),
-        ],
-      },
+      assistant(
+        toolCall("edit-1", "edit", {
+          path: "ui/src/styles/chat/sidebar.css",
+          oldText: "display: flex",
+          newText: "display: grid",
+        }),
+      ),
     ]);
     const groups = container.querySelectorAll<HTMLDetailsElement>(
       "details.chat-task-feed__tool-group",
@@ -177,15 +177,12 @@ describe("chat transcript feed", () => {
 
   it("preserves mixed-block order and associates late failure results with their call", () => {
     const container = mount([
-      {
-        role: "assistant",
-        content: [
-          { type: "text", text: "Before the command." },
-          toolCall("failed-call", "exec", { command: "pnpm check:ui" }),
-          { type: "text", text: "After the command." },
-          toolCall("successful-call", "read", { path: "ui/package.json" }),
-        ],
-      },
+      assistant(
+        text("Before the command."),
+        toolCall("failed-call", "exec", { command: "pnpm check:ui" }),
+        text("After the command."),
+        toolCall("successful-call", "read", { path: "ui/package.json" }),
+      ),
       toolResult("successful-call"),
       toolResult("failed-call", true),
     ]);
@@ -232,9 +229,9 @@ describe("chat transcript feed", () => {
         role: "assistant",
         phase: "commentary",
         content: [
-          { type: "text", text: "Commentary before the call must not appear" },
+          text("Commentary before the call must not appear"),
           toolCall("commentary-call", "read", { path: "ui/src/styles/chat/sidebar.css" }),
-          { type: "text", text: "Commentary after the call must not appear" },
+          text("Commentary after the call must not appear"),
         ],
       },
       toolResult("commentary-call"),
@@ -269,9 +266,7 @@ describe("chat transcript feed", () => {
   it("preserves a complete credential-shaped fixture while bounding the command label", () => {
     const syntheticToken = `AKIA${"0".repeat(16)}`;
     const command = `echo ${"a".repeat(140)} ${syntheticToken}`;
-    const container = mount([
-      { role: "assistant", content: [toolCall("redact", "exec", { command })] },
-    ]);
+    const container = mount([assistant(toolCall("redact", "exec", { command }))]);
     expect(container.querySelector(".chat-task-feed__row-label")?.textContent).toBe(
       command.slice(0, 160),
     );
@@ -293,7 +288,7 @@ describe("chat transcript feed", () => {
       null,
     ],
   ])("preserves %s input and setup-only command labels", (name, args, label) => {
-    const container = mount([{ role: "assistant", content: [toolCall("input", name, args)] }]);
+    const container = mount([assistant(toolCall("input", name, args))]);
     if (label !== null) {
       expect(container.querySelector(".chat-task-feed__row-label")?.textContent).toBe(label);
     } else {
@@ -342,19 +337,16 @@ describe("chat transcript feed", () => {
 
   it("names media without previews and omits private thinking blocks", () => {
     const container = mount([
-      {
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "Private reasoning must not appear" },
-          {
-            type: "image",
-            name: "layout.png",
-            source: { type: "base64", media_type: "image/png", data: "AA==" },
-          },
-          { type: "file", name: "report.txt", mimeType: "text/plain" },
-          { type: "text", text: "Attachment review complete." },
-        ],
-      },
+      assistant(
+        { type: "thinking", thinking: "Private reasoning must not appear" },
+        {
+          type: "image",
+          name: "layout.png",
+          source: { type: "base64", media_type: "image/png", data: "AA==" },
+        },
+        { type: "file", name: "report.txt", mimeType: "text/plain" },
+        text("Attachment review complete."),
+      ),
     ]);
     expect(container.textContent).toContain("layout.png");
     expect(container.textContent).toContain("report.txt");

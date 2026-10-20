@@ -103,6 +103,40 @@ function mountTranscriptPane(props: ChatThreadProps) {
   return { container, renderPane, setConnected };
 }
 
+type ImageTranscript = Awaited<ReturnType<typeof createCanonicalImageTranscript>>;
+
+function changeImage(
+  fixture: ImageTranscript,
+  change: "removal" | "replacement" | "auth" | "connection epoch" | "session",
+) {
+  if (change === "removal") {
+    fixture.publish({}, []);
+  } else if (change === "replacement") {
+    fixture.publish({}, [
+      { path: `media://inbound/${crypto.randomUUID()}.png`, contentType: "image/png" },
+    ]);
+  } else {
+    if (change === "auth") {
+      fixture.props.assistantAttachmentAuthToken = "rotated-token";
+    } else if (change === "connection epoch") {
+      fixture.props.connectionEpoch = 2;
+    } else {
+      fixture.props.sessionKey = "agent:main:other";
+    }
+    fixture.renderPane();
+  }
+}
+
+async function withMediaTimers(run: () => Promise<void>) {
+  vi.useFakeTimers();
+  try {
+    await run();
+  } finally {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  }
+}
+
 async function createCanonicalImageTranscript(
   factIndexes = [0],
   inlineUrls = ["data:image/png;base64,aW5saW5l"],
@@ -444,14 +478,7 @@ describe("canonical image presentation handoff", () => {
       fixture.publish();
       expectSameImageNodes(fixture.images(), fixture.displayed);
       const old = expectDefined(fixture.requests[0], "pending metadata");
-      if (change === "auth") {
-        fixture.props.assistantAttachmentAuthToken = "rotated-token";
-      } else if (change === "connection epoch") {
-        fixture.props.connectionEpoch = 2;
-      } else {
-        fixture.props.sessionKey = "agent:main:other";
-      }
-      fixture.renderPane();
+      changeImage(fixture, change);
       expect(fixture.images()).toHaveLength(0);
       expect(old.signal?.aborted).toBe(true);
       old.resolve(mediaMetadataResponse());
@@ -471,18 +498,14 @@ describe("canonical image presentation handoff", () => {
       fixture.publish();
       expectSameImageNodes(fixture.images(), fixture.displayed);
       const old = expectDefined(fixture.requests[0], "pending metadata");
-      if (change === "removal") {
-        fixture.publish({}, []);
-      } else if (change === "replacement") {
-        fixture.publish({}, [
-          { path: `media://inbound/${crypto.randomUUID()}.png`, contentType: "image/png" },
-        ]);
-      } else if (change === "disconnect") {
+      if (change === "disconnect") {
         fixture.setConnected(false);
         fixture.container.remove();
         await flushDeferredRowPrune();
         document.body.append(fixture.container);
         fixture.setConnected(true);
+      } else if (change !== "denial") {
+        changeImage(fixture, change);
       }
       if (change !== "denial") {
         expect(old.signal?.aborted).toBe(true);
@@ -506,19 +529,7 @@ describe("canonical image presentation handoff", () => {
       await flushDeferredRowPrune();
       const displayed = expectDefined(fixture.displayed[0], "pending native image");
       expectSameImageNodes(fixture.images(), fixture.displayed);
-      if (change === "removal") {
-        fixture.publish({}, []);
-      } else if (change === "auth") {
-        fixture.props.assistantAttachmentAuthToken = "rotated-token";
-        fixture.renderPane();
-      } else if (change === "replacement") {
-        fixture.publish({}, [
-          { path: `media://inbound/${crypto.randomUUID()}.png`, contentType: "image/png" },
-        ]);
-      } else {
-        fixture.props.connectionEpoch = 2;
-        fixture.renderPane();
-      }
+      changeImage(fixture, change);
       displayed.dispatchEvent(new Event("load"));
       displayed.dispatchEvent(new Event("error"));
       await flushDeferredRowPrune();
@@ -547,36 +558,29 @@ describe("canonical image presentation handoff", () => {
       response: () => unreadableMetadataResponse(status),
       reason: "Unavailable",
     })),
-  ])(
-    "updates native image presentation after metadata ticket $name",
-    async ({ response, reason }) => {
-      vi.useFakeTimers();
-      try {
-        const fixture = await createCanonicalImageTranscript();
-        fixture.publish();
-        fixture.requests[0]?.resolve(mediaMetadataResponse(true, "before-refresh"));
-        await vi.advanceTimersByTimeAsync(0);
-        const displayed = expectDefined(fixture.displayed[0], "displayed image");
+  ])("updates native image presentation after metadata ticket $name", ({ response, reason }) =>
+    withMediaTimers(async () => {
+      const fixture = await createCanonicalImageTranscript();
+      fixture.publish();
+      fixture.requests[0]?.resolve(mediaMetadataResponse(true, "before-refresh"));
+      await vi.advanceTimersByTimeAsync(0);
+      const displayed = expectDefined(fixture.displayed[0], "displayed image");
+      displayed.dispatchEvent(new Event("load"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      fixture.requests[1]?.resolve(response());
+      await vi.advanceTimersByTimeAsync(0);
+      if (reason) {
         displayed.dispatchEvent(new Event("load"));
-        await vi.advanceTimersByTimeAsync(1_000);
-        fixture.requests[1]?.resolve(response());
-        await vi.advanceTimersByTimeAsync(0);
-        if (reason) {
-          displayed.dispatchEvent(new Event("load"));
-          expect(fixture.images()).toHaveLength(0);
-          expect(fixture.container.textContent).toContain(reason);
-          await vi.advanceTimersByTimeAsync(5_000);
-          expect(fixture.images()).toHaveLength(0);
-        } else {
-          expectSameImageNodes(fixture.images(), fixture.displayed);
-          expect(displayed.getAttribute("src")).toContain("mediaTicket=after-refresh");
-          displayed.dispatchEvent(new Event("load"));
-        }
-      } finally {
-        vi.clearAllTimers();
-        vi.useRealTimers();
+        expect(fixture.images()).toHaveLength(0);
+        expect(fixture.container.textContent).toContain(reason);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(fixture.images()).toHaveLength(0);
+      } else {
+        expectSameImageNodes(fixture.images(), fixture.displayed);
+        expect(displayed.getAttribute("src")).toContain("mediaTicket=after-refresh");
+        displayed.dispatchEvent(new Event("load"));
       }
-    },
+    }),
   );
 
   it.each([
@@ -584,9 +588,8 @@ describe("canonical image presentation handoff", () => {
     { presentation: "canonical", failure: "HTTP 503 non-JSON", responseStatus: 503 },
   ])(
     "keeps a loaded $presentation image through $failure renewal and expiry",
-    async ({ presentation, responseStatus }) => {
-      vi.useFakeTimers();
-      try {
+    ({ presentation, responseStatus }) =>
+      withMediaTimers(async () => {
         const fixture = await createCanonicalImageTranscript(
           undefined,
           presentation === "canonical" ? [] : undefined,
@@ -617,18 +620,13 @@ describe("canonical image presentation handoff", () => {
         await vi.advanceTimersByTimeAsync(20_001);
         expectSameImageNodes(fixture.images(), [displayed]);
         expect(fixture.container.querySelector(".chat-assistant-attachment-card")).toBeNull();
-      } finally {
-        vi.clearAllTimers();
-        vi.useRealTimers();
-      }
-    },
+      }),
   );
 
   it.each(["native load error", "display load deadline"] as const)(
     "ends the retained handoff on %s and recovers only after explicit retry",
-    async (failure) => {
-      vi.useFakeTimers();
-      try {
+    (failure) =>
+      withMediaTimers(async () => {
         const fixture = await createCanonicalImageTranscript();
         fixture.publish();
         fixture.requests[0]?.resolve(mediaMetadataResponse());
@@ -670,16 +668,11 @@ describe("canonical image presentation handoff", () => {
         expect(recovered.getAttribute("src")).toContain("mediaTicket=after-explicit-retry");
         recovered.dispatchEvent(new Event("load"));
         expectSameImageNodes(fixture.images(), [recovered]);
-      } finally {
-        vi.clearAllTimers();
-        vi.useRealTimers();
-      }
-    },
+      }),
   );
 
-  it("keeps a successfully loaded native image after the handoff deadline", async () => {
-    vi.useFakeTimers();
-    try {
+  it("keeps a successfully loaded native image after the handoff deadline", () =>
+    withMediaTimers(async () => {
       const fixture = await createCanonicalImageTranscript();
       fixture.publish();
       fixture.requests[0]?.resolve(mediaMetadataResponse());
@@ -689,9 +682,5 @@ describe("canonical image presentation handoff", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       expectSameImageNodes(fixture.images(), [displayed]);
       expect(fixture.container.querySelector('[aria-busy="true"]')).toBeNull();
-    } finally {
-      vi.clearAllTimers();
-      vi.useRealTimers();
-    }
-  });
+    }));
 });

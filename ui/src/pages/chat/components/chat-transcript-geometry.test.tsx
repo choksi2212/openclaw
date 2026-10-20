@@ -13,6 +13,12 @@ import {
   mountTestTranscript,
 } from "../test-helpers/chat-transcript-native.tsx";
 import { createChatTranscript } from "./chat-transcript-controller.ts";
+import {
+  contentRows,
+  emitTranscriptResize,
+  setTranscriptViewport,
+  transcriptContainer,
+} from "./chat-transcript-fixture.test-support.tsx";
 import { readConnectedTranscriptRows } from "./chat-transcript-geometry.ts";
 import type { TranscriptRow } from "./chat-transcript-layout.ts";
 import { TranscriptRowRefs } from "./chat-transcript-row-refs.ts";
@@ -53,15 +59,11 @@ describe("chat transcript geometry", () => {
         clientHeight: { get: readHostHeight },
       });
       const transcript = createChatTranscript(() => paneId);
-      const rows = Array.from({ length: 100 }, (_, index) => ({
-        kind: "content" as const,
-        key: `row:${index}`,
-        content: <div>Turn {index}</div>,
-      }));
+      const rows = contentRows(100, "row:", "Turn");
       const renderRow = vi.fn((row: TranscriptRow) =>
         row.kind === "content" ? row.content : null,
       );
-      const container = document.body.appendChild(document.createElement("div"));
+      const container = transcriptContainer();
       const renderWindow = (windowRows = rows) => {
         renderRow.mockClear();
         render(
@@ -98,7 +100,7 @@ describe("chat transcript geometry", () => {
   );
 
   it("measures newly committed rows before observer registration using fractional layout height", () => {
-    const container = document.body.appendChild(document.createElement("div"));
+    const container = transcriptContainer();
     container.innerHTML =
       '<div class="chat-virtual-row" data-index="0" data-virtual-row-key="fractional" style="height: 100.375px"></div>';
     const row = expectDefined(
@@ -150,11 +152,7 @@ describe("chat transcript geometry", () => {
       scrollTop: 0,
       anchorToEnd: false,
     });
-    const rows = Array.from({ length: 4 }, (_, index) => ({
-      kind: "content" as const,
-      key: `fractional:${index}`,
-      content: <div>row {index}</div>,
-    }));
+    const rows = contentRows(4, "fractional:", "row");
     const { container, transcript, renderRows } = await mountTestTranscript(
       "fractional-rows",
       rows,
@@ -187,10 +185,7 @@ describe("chat transcript geometry", () => {
         rows,
       );
       try {
-        Object.defineProperties(container, {
-          clientHeight: { configurable: true, value: 600 },
-          scrollHeight: { configurable: true, value: 1200 },
-        });
+        setTranscriptViewport(container, 1200);
         container.scrollTop = 600;
         // JSDOM does not emit the browser's scroll read-back that settles initial compensation.
         container.dispatchEvent(new Event("scroll"));
@@ -220,7 +215,7 @@ describe("chat transcript geometry", () => {
   it("updates rail geometry for size changes without measuring streamed content or retired transcripts", async () => {
     const flushFrames = stubAnimationFrames();
     const transcript = createTestTranscript();
-    const region = document.body.appendChild(document.createElement("div"));
+    const region = transcriptContainer();
     region.className = "chat-main__conversation";
     let regionHeight = 600;
     let gutter = 100;
@@ -250,11 +245,6 @@ describe("chat transcript geometry", () => {
       transcript.update();
       flush();
     };
-    const emitResize = (element: Element, width: number, height: number) => {
-      for (const observer of resizeObservers) {
-        observer.emitTarget(element, width, height);
-      }
-    };
     try {
       renderTranscript();
       transcript.start();
@@ -263,8 +253,8 @@ describe("chat transcript geometry", () => {
       const viewport = expectDefined(transcript.scrollElement, "rail viewport");
       const inner = expectDefined(viewport.querySelector(".chat-thread-inner"), "rail column");
       const column = expectDefined(inner.querySelector(".chat-virtual-sizer"), "column width");
-      emitResize(column, innerWidth, 0);
-      emitResize(region, 1200, regionHeight);
+      emitTranscriptResize(column, innerWidth, 0);
+      emitTranscriptResize(region, 1200, regionHeight);
       flushFrames();
       expect(viewport.hasAttribute("data-position-rail-gutter")).toBe(true);
       expect(viewport.style.getPropertyValue("--chat-position-rail-viewport-height")).toBe("600px");
@@ -274,7 +264,7 @@ describe("chat transcript geometry", () => {
       for (const [index, text] of ["one", "two", "three"].entries()) {
         props.stream = `Live ${text}`;
         renderTranscript();
-        emitResize(inner, innerWidth, 1300 + index * 100);
+        emitTranscriptResize(inner, innerWidth, 1300 + index * 100);
         flushFrames();
         expect(viewport.textContent).toContain(`Live ${text}`);
       }
@@ -283,7 +273,7 @@ describe("chat transcript geometry", () => {
       // Saved message width changes the column without resizing its viewport.
       gutter = 20;
       innerWidth = 1160;
-      emitResize(column, innerWidth, 0);
+      emitTranscriptResize(column, innerWidth, 0);
       flushFrames();
       expect(viewport.hasAttribute("data-position-rail-gutter")).toBe(false);
       expect(viewport.style.getPropertyValue("--chat-transcript-column-width")).toBe("1160px");
@@ -291,7 +281,7 @@ describe("chat transcript geometry", () => {
       readInnerBounds.mockClear();
 
       regionHeight = 720;
-      emitResize(region, 1200, regionHeight);
+      emitTranscriptResize(region, 1200, regionHeight);
       flushFrames();
       expect(viewport.style.getPropertyValue("--chat-position-rail-viewport-height")).toBe("720px");
       expect(readInnerBounds).toHaveBeenCalledOnce();
@@ -314,36 +304,36 @@ describe("chat transcript geometry", () => {
       expect(replacement).not.toBe(inner);
       gutter = 100;
       innerWidth = 768;
-      emitResize(
+      emitTranscriptResize(
         expectDefined(replacement.querySelector(".chat-virtual-sizer"), "replacement column"),
         innerWidth,
         0,
       );
-      emitResize(region, 1200, regionHeight);
+      emitTranscriptResize(region, 1200, regionHeight);
       flushFrames();
       expect(replacementViewport.hasAttribute("data-position-rail-gutter")).toBe(true);
       expect(replacementViewport.style.getPropertyValue("--chat-transcript-column-width")).toBe(
         "768px",
       );
       readInnerBounds.mockClear();
-      emitResize(inner, 400, 400);
+      emitTranscriptResize(inner, 400, 400);
       flushFrames();
       expect(readInnerBounds).not.toHaveBeenCalled();
 
-      emitResize(replacement, 700, 400);
+      emitTranscriptResize(replacement, 700, 400);
       transcript.dispose();
       render(null, region);
       flushFrames();
       expect(readInnerBounds).not.toHaveBeenCalled();
       vi.mocked(requestAnimationFrame).mockClear();
-      emitResize(replacement, 600, 400);
-      emitResize(region, 1200, 800);
+      emitTranscriptResize(replacement, 600, 400);
+      emitTranscriptResize(region, 1200, 800);
       expect(requestAnimationFrame).not.toHaveBeenCalled();
 
       transcript.start();
       renderTranscript();
       await flushDeferredRowPrune();
-      emitResize(region, 1200, regionHeight);
+      emitTranscriptResize(region, 1200, regionHeight);
       flushFrames();
       const restored = expectDefined(transcript.scrollElement, "restored rail viewport");
       expect(restored.hasAttribute("data-position-rail-gutter")).toBe(true);
@@ -361,7 +351,7 @@ describe("chat transcript geometry", () => {
         anchorToEnd: false,
       });
     }
-    const geometryEventTarget = document.body.appendChild(document.createElement("div"));
+    const geometryEventTarget = transcriptContainer();
     const viewportChanged = vi.fn();
     const main = createChatTranscript(() => "pane-geometry-main", {
       geometryEventTarget,
@@ -412,20 +402,14 @@ describe("chat transcript geometry", () => {
     expect(main.scrollElement).toBe(mainScroller);
     expect(detail.scrollElement).toBe(detailScroller);
     for (const width of [800, 640]) {
-      for (const observer of resizeObservers) {
-        observer.emitTarget(detailScroller, width, 600);
-      }
+      emitTranscriptResize(detailScroller, width, 600);
     }
     expect(viewportChanged).not.toHaveBeenCalled();
-    for (const observer of resizeObservers) {
-      observer.emitTarget(mainScroller, 800, 600);
-    }
+    emitTranscriptResize(mainScroller, 800, 600);
     mainScroller.scrollTop = 40;
     mainScroller.dispatchEvent(new Event("scroll"));
     transcriptDomState.measuredRowHeight = 180;
-    for (const observer of resizeObservers) {
-      observer.emitTarget(mainScroller, 640, 600);
-    }
+    emitTranscriptResize(mainScroller, 640, 600);
     renderTranscripts();
     await flushDeferredRowPrune();
     expect(viewportChanged).toHaveBeenCalledOnce();
@@ -454,7 +438,7 @@ describe("chat transcript geometry", () => {
 
   it("keeps rendering rows after a hide-transition zero rect", async () => {
     const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
+    const container = transcriptContainer();
     const messages = Array.from({ length: 40 }, (_, index) => ({
       role: index % 2 === 0 ? "user" : "assistant",
       content: `message ${index}`,

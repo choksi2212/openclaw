@@ -39,6 +39,7 @@ import { releaseChatMediaResourceOwner } from "./chat-message-media.ts";
 import { resetTranscriptSession, toggleTranscriptSearch } from "./chat-thread-interactions.ts";
 import { ChatThread } from "./chat-thread-view.tsx";
 import { settleToolBridges } from "./chat-tool-render.test-support.ts";
+import { transcriptContainer, threadFixture } from "./chat-transcript-fixture.test-support.tsx";
 import { projectChatTranscript } from "./chat-transcript-projection.ts";
 import {
   flushDeferredRowPrune,
@@ -64,9 +65,7 @@ describe("chat transcript invalidation", () => {
       props.currentAgentId = agentId;
       props.selectedSession = { key: props.sessionKey, kind: "group", updatedAt: 1 };
       props.branding = { ...branding, avatarHat: undefined };
-      const transcript = createTestTranscript();
-      const container = document.body.appendChild(document.createElement("div"));
-      const rerender = () => render(renderChatThread(props, transcript), container);
+      const { transcript, container, rerender } = threadFixture(props);
       const previousBranding = currentThemeBranding();
       try {
         setCurrentThemeBranding(props.branding);
@@ -135,9 +134,8 @@ describe("chat transcript invalidation", () => {
         participants: [self, { identity: { type: "agent", id: "main" }, label: "Molty" }],
         participantCount: 2,
       };
-      const transcript = createTestTranscript();
-      const container = document.body.appendChild(document.createElement("div"));
-      const searchContainer = document.body.appendChild(document.createElement("div"));
+      const { transcript, container } = threadFixture(props);
+      const searchContainer = transcriptContainer();
       const rerender = () => {
         render(renderTranscriptSearch(paneId), searchContainer);
         render(renderChatThread({ ...props, mediaOwner: rerender }, transcript), container);
@@ -240,7 +238,7 @@ describe("chat transcript invalidation", () => {
         transcriptVisible: true,
         onOpenSidebar,
       };
-      container = document.body.appendChild(document.createElement("div"));
+      container = transcriptContainer();
       transcript = createTestTranscript();
       transcript.start();
     });
@@ -328,9 +326,7 @@ describe("chat transcript invalidation", () => {
       { role: "assistant", content: "ClawSweeper PR **#1576 opened**", timestamp: 1_000 },
     ]);
     props.githubRepo = { owner: "openclaw", repo: "openclaw" };
-    const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
-    const rerender = () => render(renderChatThread(props, transcript), container);
+    const { container, rerender } = threadFixture(props);
     const chip = () => container.querySelector<HTMLAnchorElement>("a.markdown-github-item");
     rerender();
     expect(chip()).toBeNull();
@@ -352,9 +348,7 @@ describe("chat transcript invalidation", () => {
     const props = threadProps("pane-github-repository", "agent:main:github-repository", [
       { role: "assistant", content: "PR #141270", timestamp: 1_000 },
     ]);
-    const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
-    const rerender = () => render(renderChatThread(props, transcript), container);
+    const { container, rerender } = threadFixture(props);
     const chip = () => container.querySelector<HTMLAnchorElement>("a.markdown-github-item");
     rerender();
     expect(chip()).toBeNull();
@@ -443,10 +437,9 @@ describe("chat transcript invalidation", () => {
         stream: "Draft next reply",
         streamStartedAt: 5_000,
       };
-      const transcript = createTestTranscript();
-      const container = document.body.appendChild(document.createElement("div"));
+      const { transcript, container, rerender: renderThread } = threadFixture(props);
       const rerender = () => {
-        render(renderChatThread(props, transcript), container);
+        renderThread();
         transcript.update();
       };
       const prepareFrame = vi.spyOn(chatMessage, "prepareMessageGroupFrame");
@@ -549,11 +542,10 @@ describe("chat transcript invalidation", () => {
       updatedAt: 1,
       placement: { state: "requested", ...timing },
     };
-    const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
+    const { transcript, container, rerender: renderThread } = threadFixture(props);
     const buildSpy = vi.spyOn(chatThreadBuild, "buildChatItems");
     const rerender = () => {
-      render(renderChatThread(props, transcript), container);
+      renderThread();
       transcript.update();
     };
     try {
@@ -596,9 +588,7 @@ describe("chat transcript invalidation", () => {
       { role: "assistant", content: "Hi" },
     ]);
     props.selectedSession = { key: props.sessionKey, kind: "direct", updatedAt: 1 };
-    const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
-    const rerender = () => render(renderChatThread(props, transcript), container);
+    const { container, rerender } = threadFixture(props);
     const prepareFrame = vi.spyOn(chatMessage, "prepareMessageGroupFrame");
     rerender();
     const userRow = expectDefined(container.querySelector(".chat-group.user"), "user row");
@@ -652,10 +642,9 @@ describe("chat transcript invalidation", () => {
             },
     }));
     vi.stubGlobal("fetch", fetchMock);
-    const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
+    const { transcript, container, rerender: renderThread } = threadFixture(props);
     const rerender = () => {
-      render(renderChatThread(props, transcript), container);
+      renderThread();
       transcript.update();
     };
     props.mediaOwner = rerender;
@@ -715,7 +704,7 @@ describe("chat transcript invalidation", () => {
 
     const source = `/api/chat/media/outgoing/agent%3Amain%3Amain/${crypto.randomUUID()}/full`;
     const transcript = createTestTranscript();
-    const container = document.body.appendChild(document.createElement("div"));
+    const container = transcriptContainer();
     const client = {
       request: vi.fn(async () => null),
     } as unknown as Parameters<typeof createTestChatPane>[0]["client"];
@@ -888,7 +877,7 @@ describe("chat transcript invalidation", () => {
       showToolCalls: true,
     };
     const controller = createTestTranscript();
-    const retainedPane = document.body.appendChild(document.createElement("div"));
+    const retainedPane = transcriptContainer();
     render(renderChatThread(props, controller), retainedPane);
     await settleToolBridges(retainedPane);
     const staleTools = getExpandedToolCards(sessionKey);
@@ -897,7 +886,7 @@ describe("chat transcript invalidation", () => {
     const previousUserVersion = getExpansionStateVersion(staleUsers);
 
     for (let index = 0; index < 20; index += 1) {
-      const alternatePane = document.body.appendChild(document.createElement("div"));
+      const alternatePane = transcriptContainer();
       render(
         renderChatThread(
           {
@@ -969,7 +958,7 @@ describe("chat transcript invalidation", () => {
     });
     const toolVisibilityController = createTestTranscript(toolVisibilityProps.paneId);
     onTestFinished(() => toolVisibilityController.dispose());
-    const toolVisibilityPane = document.body.appendChild(document.createElement("div"));
+    const toolVisibilityPane = transcriptContainer();
     const renderToolVisibility = async (next = toolVisibilityProps) => {
       render(renderChatThread(next, toolVisibilityController), toolVisibilityPane);
       toolVisibilityController.update();
@@ -985,33 +974,19 @@ describe("chat transcript invalidation", () => {
       Array.from(
         toolVisibilityPane.querySelectorAll<HTMLButtonElement>(".chat-tool-msg-summary"),
       ).filter((button) => !button.closest(".chat-tool-msg-body"));
+    const expansion = () =>
+      disclosureButtons().map((button) => button.getAttribute("aria-expanded"));
+    const expectExpansion = (...values: string[]) =>
+      waitForSolid(() => expect(expansion()).toEqual(values));
     await waitForSolid(() => expect(disclosureButtons()).toHaveLength(2));
     expect(disclosureButtons()).toHaveLength(2);
-    expect(disclosureButtons().map((button) => button.getAttribute("aria-expanded"))).toEqual([
-      "false",
-      "false",
-    ]);
+    expect(expansion()).toEqual(["false", "false"]);
     expectDefined(disclosureButtons()[0], "first mounted tool disclosure").click();
-    await waitForSolid(() =>
-      expect(disclosureButtons().map((button) => button.getAttribute("aria-expanded"))).toEqual([
-        "true",
-        "false",
-      ]),
-    );
+    await expectExpansion("true", "false");
     expectDefined(disclosureButtons()[1], "second mounted tool disclosure").click();
-    await waitForSolid(() =>
-      expect(disclosureButtons().map((button) => button.getAttribute("aria-expanded"))).toEqual([
-        "true",
-        "true",
-      ]),
-    );
+    await expectExpansion("true", "true");
     expectDefined(disclosureButtons()[1], "second mounted tool disclosure").click();
-    await waitForSolid(() =>
-      expect(disclosureButtons().map((button) => button.getAttribute("aria-expanded"))).toEqual([
-        "true",
-        "false",
-      ]),
-    );
+    await expectExpansion("true", "false");
 
     await renderToolVisibility({ ...toolVisibilityProps, transcriptVisible: false });
     setExpansionState(visibilityState, expandedToolId, false);
@@ -1029,10 +1004,7 @@ describe("chat transcript invalidation", () => {
     await renderToolVisibility();
 
     expect(disclosureButtons()).toHaveLength(2);
-    expect(disclosureButtons().map((button) => button.getAttribute("aria-expanded"))).toEqual([
-      "true",
-      "false",
-    ]);
+    expect(expansion()).toEqual(["true", "false"]);
     expect(visibilityState.get(expandedToolId)).toBe(true);
     expect(visibilityState.get(collapsedToolId)).toBe(false);
     await renderToolVisibility({

@@ -11,6 +11,10 @@ import {
 } from "../test-helpers/chat-transcript-native.tsx";
 import { getTranscriptState, toggleTranscriptSearch } from "./chat-thread-interactions.ts";
 import {
+  transcriptContainer,
+  searchableThreadFixture,
+} from "./chat-transcript-fixture.test-support.tsx";
+import {
   flushDeferredRowPrune,
   installTranscriptDomMocks,
   requireElement,
@@ -32,7 +36,7 @@ describe("chat transcript message controls", () => {
   it("projects search changes without redraw callbacks or replacing its input", () => {
     const paneId = "native-search-revision";
     const state = getTranscriptState(paneId);
-    const container = document.body.appendChild(document.createElement("div"));
+    const container = transcriptContainer();
     render(renderTranscriptSearch(paneId), container);
     try {
       expect(container.querySelector("input")).toBeNull();
@@ -61,8 +65,8 @@ describe("chat transcript message controls", () => {
   it("keeps live metadata absent while revealing stored metadata within each transcript", async () => {
     const firstTranscript = createTestTranscript();
     const secondTranscript = createTestTranscript();
-    const firstContainer = document.body.appendChild(document.createElement("div"));
-    const secondContainer = document.body.appendChild(document.createElement("div"));
+    const firstContainer = transcriptContainer();
+    const secondContainer = transcriptContainer();
     const firstProps = {
       ...threadProps("pane-touch-first", "agent:main:first", [
         { role: "user", content: "Stored message", timestamp: 1_000 },
@@ -179,7 +183,7 @@ describe("chat transcript message controls", () => {
           },
         };
         const transcript = createTestTranscript();
-        const container = document.body.appendChild(document.createElement("div"));
+        const container = transcriptContainer();
         try {
           render(renderChatThread(props, transcript), container);
           transcript.start();
@@ -254,14 +258,7 @@ describe("chat transcript message controls", () => {
           },
         ],
       };
-      const transcript = createTestTranscript();
-      const searchContainer = document.body.appendChild(document.createElement("div"));
-      const container = document.body.appendChild(document.createElement("div"));
-      const rerender = () => {
-        render(renderTranscriptSearch(paneId), searchContainer);
-        render(renderChatThread(props, transcript), container);
-        transcript.update();
-      };
+      const { transcript, container, searchContainer, rerender } = searchableThreadFixture(props);
       try {
         rerender();
         toggleTranscriptSearch(paneId);
@@ -315,14 +312,7 @@ describe("chat transcript message controls", () => {
         },
         { role: "assistant", content: "Workspace looks fine.", timestamp: 3_000 },
       ]);
-      const transcript = createTestTranscript();
-      const searchContainer = document.body.appendChild(document.createElement("div"));
-      const container = document.body.appendChild(document.createElement("div"));
-      const rerender = () => {
-        render(renderTranscriptSearch(paneId), searchContainer);
-        render(renderChatThread(props, transcript), container);
-        transcript.update();
-      };
+      const { transcript, container, searchContainer, rerender } = searchableThreadFixture(props);
       try {
         if (search) {
           toggleTranscriptSearch(paneId);
