@@ -639,7 +639,10 @@ try {
         { timeout: 30_000 },
       );
     } catch (error) {
-      const diagnostics = await page.evaluate(() => Reflect.get(window, "__coldLoad")?.read());
+      const diagnostics = await page.evaluate(() => ({
+        ...Reflect.get(window, "__coldLoad")?.read(),
+        widgetReadiness: Reflect.get(window, "__readWidgetReadiness")?.(),
+      }));
       await writeFile(
         path.join(artifactDir, "failure.json"),
         JSON.stringify({ diagnostics, errors }, null, 2),
@@ -673,6 +676,22 @@ try {
     await page.locator('[data-navigation-view="online"]').click();
   }
   await settle();
+  if (face === "dashboard" && values["dashboard-widget"]) {
+    await page.locator("button.chat-pane__layout-trigger:not([inert] *)").first().click();
+    const menu = page.locator(".chat-pane__layout-menu");
+    await menu
+      .getByRole("menuitem", { name: /^Swap / })
+      .or(menu.getByRole("menuitemcheckbox", { name: /^Swap / }))
+      .click();
+    await page.waitForFunction(
+      () =>
+        document
+          .querySelector("openclaw-board-view")
+          ?.closest("[data-region]")
+          ?.getAttribute("data-region") === "main",
+    );
+    await settle();
+  }
   await page.locator('aside.sidebar[data-snapshot-saved="true"]').waitFor();
   const warmInput: Parameters<typeof persistColdLoadWarmState>[0] = {
     sessionKey: fixture.selectedSessionKey,
