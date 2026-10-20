@@ -4,6 +4,7 @@ import { makeZeroUsageSnapshot } from "../../agents/usage.js";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import { initSessionState } from "../../auto-reply/reply/session.js";
+import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import {
   deleteSessionEntryLifecycle,
   loadSessionEntryReadOnly,
@@ -44,10 +45,72 @@ import { dispatchCronDelivery } from "./delivery-dispatch.js";
 import { messageToolOutcome } from "./delivery-dispatch.test-fixtures.js";
 import { resolveDeliveryTarget } from "./delivery-target.js";
 
+type CompletionFixture = Awaited<ReturnType<typeof createCompletionFixture>>;
+type TestChannel = Parameters<typeof createChannelTestPluginBase>[0]["id"];
+
+function installDestinationChannel(
+  channel: TestChannel,
+  outbound: ChannelPlugin["outbound"],
+  messaging?: ChannelPlugin["messaging"],
+) {
+  setActivePluginRegistry(
+    createTestRegistry([
+      {
+        pluginId: channel,
+        source: "test",
+        plugin: {
+          ...createChannelTestPluginBase({ id: channel }),
+          outbound,
+          ...(messaging ? { messaging } : {}),
+        },
+      },
+    ]),
+  );
+}
+
+async function prepareDelivery(fixture: CompletionFixture, delivery = fixture.params.job.delivery) {
+  fixture.params.job.delivery = delivery;
+  fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.params.job);
+  fixture.params.resolvedDelivery = await resolveDeliveryTarget(
+    fixture.params.cfgWithAgentDefaults,
+    "main",
+    { ...fixture.params.job, ...fixture.params.deliveryPlan },
+  );
+}
+
+function setReport(fixture: CompletionFixture, text: string | undefined) {
+  fixture.params.deliveryPayloads = text ? [{ text }] : [];
+  fixture.params.synthesizedText = text;
+}
+
+async function expectReport(
+  destination: Parameters<typeof readConversationMessages>[0],
+  text: string,
+) {
+  const messages = await readConversationMessages(destination);
+  expect(messages).toHaveLength(1);
+  expect(readTranscriptEventMessage(messages[0])?.content).toEqual([{ type: "text", text }]);
+}
+
+function expectDeliveryWarning(
+  result: Awaited<ReturnType<typeof dispatchCronDelivery>>,
+  message: string,
+) {
+  expect(result).toMatchObject({
+    delivered: true,
+    deliveryError: undefined,
+    diagnostics: {
+      entries: expect.arrayContaining([
+        expect.objectContaining({ source: "delivery", severity: "warn", message }),
+      ]),
+    },
+  });
+}
+
 describe("destination-owned completion", () => {
   it("keeps the destination session for a reply to a delivered cron question", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state, "isolated");
+      await using fixture = await createCompletionFixture(state, "isolated");
       const registry = captureActivePluginRegistrySnapshot();
       const lastHumanAt = Date.now() - 185 * 60_000;
       const destination = { ...fixture.scope, sessionKey: "agent:main:telegram:direct:12345" };
@@ -67,28 +130,10 @@ describe("destination-owned completion", () => {
         reset: { mode: "idle", idleMinutes: 180 },
       };
       const sendText = vi.fn(async () => ({ channel: "telegram", messageId: "cron-question" }));
-      setActivePluginRegistry(
-        createTestRegistry([
-          {
-            pluginId: "telegram",
-            source: "test",
-            plugin: {
-              ...createChannelTestPluginBase({ id: "telegram" }),
-              outbound: { deliveryMode: "direct", sendText },
-            },
-          },
-        ]),
-      );
+      installDestinationChannel("telegram", { deliveryMode: "direct", sendText });
       try {
-        fixture.job.delivery = { mode: "announce", channel: "telegram", to: "12345" };
-        fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.job);
-        fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-          fixture.params.cfgWithAgentDefaults,
-          "main",
-          { ...fixture.job, ...fixture.params.deliveryPlan },
-        );
-        fixture.params.deliveryPayloads = [{ text: "Approve the scheduled transaction?" }];
-        fixture.params.synthesizedText = "Approve the scheduled transaction?";
+        await prepareDelivery(fixture, { mode: "announce", channel: "telegram", to: "12345" });
+        setReport(fixture, "Approve the scheduled transaction?");
 
         const deliveryStartedAt = Date.now();
         const delivered = await dispatchCronDelivery(fixture.params);
@@ -120,21 +165,16 @@ describe("destination-owned completion", () => {
           sessionId: generation.sessionId,
           sessionEntry: generation,
         });
-        const messages = await readConversationMessages(destination);
-        expect(messages).toHaveLength(1);
-        expect(readTranscriptEventMessage(messages[0])?.content).toEqual([
-          { type: "text", text: "Approve the scheduled transaction?" },
-        ]);
+        await expectReport(destination, "Approve the scheduled transaction?");
       } finally {
         restoreActivePluginRegistrySnapshot(registry);
-        await fixture.dispose();
       }
     });
   });
 
   it("sends a native-only Discord embed without inventing conversation text", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state, "isolated");
+      await using fixture = await createCompletionFixture(state, "isolated");
       const registry = captureActivePluginRegistrySnapshot();
       const payload: ReplyPayload = {
         channelData: {
@@ -147,26 +187,13 @@ describe("destination-owned completion", () => {
         expect(request.payload.text ?? "").toBe("");
         return { channel: "discord", messageId: "native-report" };
       });
-      setActivePluginRegistry(
-        createTestRegistry([
-          {
-            pluginId: "discord",
-            source: "test",
-            plugin: {
-              ...createChannelTestPluginBase({ id: "discord" }),
-              outbound: { deliveryMode: "direct", sendText, sendPayload },
-            },
-          },
-        ]),
-      );
+      installDestinationChannel("discord", { deliveryMode: "direct", sendText, sendPayload });
       try {
-        fixture.job.delivery = { mode: "announce", channel: "discord", to: "channel:12345" };
-        fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.job);
-        fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-          fixture.params.cfgWithAgentDefaults,
-          "main",
-          { ...fixture.job, ...fixture.params.deliveryPlan },
-        );
+        await prepareDelivery(fixture, {
+          mode: "announce",
+          channel: "discord",
+          to: "channel:12345",
+        });
         assert(fixture.params.resolvedDelivery.ok);
         assert(fixture.params.resolvedDelivery.sessionRoute);
         const destinationSessionKey = fixture.params.resolvedDelivery.sessionRoute.sessionKey;
@@ -176,19 +203,7 @@ describe("destination-owned completion", () => {
         fixture.params.synthesizedText = undefined;
 
         const result = await dispatchCronDelivery(fixture.params);
-        expect(result).toMatchObject({
-          delivered: true,
-          deliveryError: undefined,
-          diagnostics: {
-            entries: expect.arrayContaining([
-              expect.objectContaining({
-                source: "delivery",
-                severity: "warn",
-                message: "native-only payload not added to conversation",
-              }),
-            ]),
-          },
-        });
+        expectDeliveryWarning(result, "native-only payload not added to conversation");
         expect(sendPayload).toHaveBeenCalledOnce();
         expect(sendText).not.toHaveBeenCalled();
         expect(await fixture.messages()).toEqual([]);
@@ -200,14 +215,13 @@ describe("destination-owned completion", () => {
         ).toEqual([]);
       } finally {
         restoreActivePluginRegistrySnapshot(registry);
-        await fixture.dispose();
       }
     });
   });
 
   it("inherits required sandbox policy from the exact execution source for a new destination", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state, "isolated");
+      await using fixture = await createCompletionFixture(state, "isolated");
       const registry = captureActivePluginRegistrySnapshot();
       const actor = { type: "human" as const, source: "profile" as const, id: "cron-creator" };
       const destination = {
@@ -229,32 +243,14 @@ describe("destination-owned completion", () => {
         channel: "telegram",
         messageId: "sandboxed-report",
       }));
-      setActivePluginRegistry(
-        createTestRegistry([
-          {
-            pluginId: "telegram",
-            source: "test",
-            plugin: {
-              ...createChannelTestPluginBase({ id: "telegram" }),
-              outbound: { deliveryMode: "direct", sendText },
-            },
-          },
-        ]),
-      );
+      installDestinationChannel("telegram", { deliveryMode: "direct", sendText });
       try {
         fixture.params.cfgWithAgentDefaults.session = {
           ...fixture.params.cfgWithAgentDefaults.session,
           dmScope: "per-channel-peer",
         };
-        fixture.job.delivery = { mode: "announce", channel: "telegram", to: "12345" };
-        fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.job);
-        fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-          fixture.params.cfgWithAgentDefaults,
-          "main",
-          { ...fixture.job, ...fixture.params.deliveryPlan },
-        );
-        fixture.params.deliveryPayloads = [{ text: "Sandboxed report" }];
-        fixture.params.synthesizedText = "Sandboxed report";
+        await prepareDelivery(fixture, { mode: "announce", channel: "telegram", to: "12345" });
+        setReport(fixture, "Sandboxed report");
 
         expect(await dispatchCronDelivery(fixture.params)).toMatchObject({ delivered: true });
         expect(sendText).toHaveBeenCalledOnce();
@@ -269,7 +265,6 @@ describe("destination-owned completion", () => {
         expect(await fixture.messages()).toEqual([]);
       } finally {
         restoreActivePluginRegistrySnapshot(registry);
-        await fixture.dispose();
       }
     });
   });
@@ -278,7 +273,7 @@ describe("destination-owned completion", () => {
     "does not rebind remembered main coordinates when the recipient is %s",
     async (outcome) => {
       await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        const fixture = await createCompletionFixture(state, "isolated");
+        await using fixture = await createCompletionFixture(state, "isolated");
         const registry = captureActivePluginRegistrySnapshot();
         const clock = outcome === "uncertain" ? vi.spyOn(Date, "now") : undefined;
         const destination = { ...fixture.scope, sessionKey: "agent:main:main" };
@@ -318,32 +313,14 @@ describe("destination-owned completion", () => {
             retryable: false,
           });
         });
-        setActivePluginRegistry(
-          createTestRegistry([
-            {
-              pluginId: "telegram",
-              source: "test",
-              plugin: {
-                ...createChannelTestPluginBase({ id: "telegram" }),
-                outbound: { deliveryMode: "direct", sendText },
-              },
-            },
-          ]),
-        );
+        installDestinationChannel("telegram", { deliveryMode: "direct", sendText });
         try {
-          fixture.job.delivery = { mode: "announce", channel: "telegram", to: "12345" };
-          fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.job);
-          fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-            fixture.params.cfgWithAgentDefaults,
-            "main",
-            { ...fixture.job, ...fixture.params.deliveryPlan },
-          );
+          await prepareDelivery(fixture, { mode: "announce", channel: "telegram", to: "12345" });
           assert(fixture.params.resolvedDelivery.ok);
           expect(fixture.params.resolvedDelivery.sessionRoute?.sessionKey).toBe(
             destination.sessionKey,
           );
-          fixture.params.deliveryPayloads = [{ text: "Undelivered report" }];
-          fixture.params.synthesizedText = "Undelivered report";
+          setReport(fixture, "Undelivered report");
 
           expect(await dispatchCronDelivery(fixture.params)).toMatchObject(
             outcome === "uncertain"
@@ -359,7 +336,6 @@ describe("destination-owned completion", () => {
         } finally {
           clock?.mockRestore();
           restoreActivePluginRegistrySnapshot(registry);
-          await fixture.dispose();
         }
       });
     },
@@ -373,7 +349,7 @@ describe("destination-owned completion", () => {
           mode === "threaded"
             ? "agent:main:telegram:direct:12345:thread:12345:42"
             : "agent:main:telegram:direct:12345";
-        const fixture = await createCompletionFixture(state, "isolated");
+        await using fixture = await createCompletionFixture(state, "isolated");
         const registry = captureActivePluginRegistrySnapshot();
         const commitFailure =
           mode === "tool-commit-failure"
@@ -474,67 +450,51 @@ describe("destination-owned completion", () => {
           expect(await fixture.messages()).toEqual([]);
           return { channel: "telegram", messageId: "notification-message" };
         });
-        setActivePluginRegistry(
-          createTestRegistry([
-            {
-              pluginId: "telegram",
-              source: "test",
-              plugin: {
-                ...createChannelTestPluginBase({ id: "telegram" }),
-                messaging: {
-                  resolveOutboundSessionRoute: (params: ChannelOutboundSessionRouteParams) => {
-                    const chatId = params.target.split(":")[0]!;
-                    const route = buildChannelOutboundSessionRoute({
-                      cfg: params.cfg,
-                      agentId: params.agentId,
-                      channel: "telegram",
-                      accountId: params.accountId,
-                      peer: { kind: "direct", id: chatId },
-                      chatType: "direct",
-                      from: `telegram:${chatId}`,
-                      to: `telegram:${chatId}`,
-                      recipientSessionExact: true,
-                    });
-                    // Models Telegram's current-session thread recovery (extensions/telegram/src/channel.ts:459-466).
-                    const threaded = buildThreadAwareOutboundSessionRoute({
-                      route,
-                      threadId:
-                        params.threadId == null ? undefined : `${chatId}:${params.threadId}`,
-                      currentSessionKey: params.currentSessionKey,
-                      precedence: ["threadId", "currentSession"],
-                    });
-                    const threadId = threaded.threadId?.toString().split(":").at(-1);
-                    return {
-                      ...threaded,
-                      threadId: threadId === undefined ? undefined : Number(threadId),
-                      to:
-                        threadId === undefined
-                          ? `telegram:${chatId}`
-                          : `telegram:${chatId}:topic:${threadId}`,
-                    };
-                  },
-                },
-                outbound: { deliveryMode: "direct", sendText },
-              },
+        installDestinationChannel(
+          "telegram",
+          { deliveryMode: "direct", sendText },
+          {
+            resolveOutboundSessionRoute: (params: ChannelOutboundSessionRouteParams) => {
+              const chatId = params.target.split(":")[0]!;
+              const route = buildChannelOutboundSessionRoute({
+                cfg: params.cfg,
+                agentId: params.agentId,
+                channel: "telegram",
+                accountId: params.accountId,
+                peer: { kind: "direct", id: chatId },
+                chatType: "direct",
+                from: `telegram:${chatId}`,
+                to: `telegram:${chatId}`,
+                recipientSessionExact: true,
+              });
+              // Models Telegram's current-session thread recovery (extensions/telegram/src/channel.ts:459-466).
+              const threaded = buildThreadAwareOutboundSessionRoute({
+                route,
+                threadId: params.threadId == null ? undefined : `${chatId}:${params.threadId}`,
+                currentSessionKey: params.currentSessionKey,
+                precedence: ["threadId", "currentSession"],
+              });
+              const threadId = threaded.threadId?.toString().split(":").at(-1);
+              return {
+                ...threaded,
+                threadId: threadId === undefined ? undefined : Number(threadId),
+                to:
+                  threadId === undefined
+                    ? `telegram:${chatId}`
+                    : `telegram:${chatId}:topic:${threadId}`,
+              };
             },
-          ]),
+          },
         );
         try {
-          fixture.params.job.delivery = {
+          await prepareDelivery(fixture, {
             mode: "announce",
             channel: "telegram",
             to: "12345",
             ...(mode === "threaded" ? { threadId: 42 } : {}),
             ...(mode === "cross-agent" ? { accountId: "default" } : {}),
-          };
-          fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.params.job);
-          fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-            fixture.params.cfgWithAgentDefaults,
-            "main",
-            { ...fixture.params.job, ...fixture.params.deliveryPlan },
-          );
-          fixture.params.deliveryPayloads = [{ text: "Final destination report" }];
-          fixture.params.synthesizedText = "Final destination report";
+          });
+          setReport(fixture, "Final destination report");
           if (mode === "tool-commit-failure") {
             fixture.params.sourceDeliveryOutcome = messageToolOutcome([
               {
@@ -551,37 +511,16 @@ describe("destination-owned completion", () => {
           expect(await dispatchCronDelivery(fixture.params)).toMatchObject(expected);
           expect(sendText).toHaveBeenCalledTimes(mode === "tool-commit-failure" ? 0 : 1);
           if (commitFailure) {
-            expect(result.deliveryError).toBeUndefined();
-          }
-          if (commitFailure) {
-            expect(result).toMatchObject({
-              diagnostics: {
-                entries: expect.arrayContaining([
-                  expect.objectContaining({
-                    source: "delivery",
-                    severity: "warn",
-                    message:
-                      "result was delivered but was not added to the conversation: completion commit rejected",
-                  }),
-                ]),
-              },
-            });
+            expectDeliveryWarning(
+              result,
+              "result was delivered but was not added to the conversation: completion commit rejected",
+            );
           }
           if (mode === "cross-agent") {
-            expect(result).toMatchObject({
-              delivered: true,
-              deliveryError: undefined,
-              diagnostics: {
-                entries: expect.arrayContaining([
-                  expect.objectContaining({
-                    source: "delivery",
-                    severity: "warn",
-                    message:
-                      "Conversation context skipped: the destination belongs to a different agent.",
-                  }),
-                ]),
-              },
-            });
+            expectDeliveryWarning(
+              result,
+              "Conversation context skipped: the destination belongs to a different agent.",
+            );
             expect(fixture.updates()).toBe(0);
             for (const agentId of ["main", "other"]) {
               expect(
@@ -614,7 +553,6 @@ describe("destination-owned completion", () => {
         } finally {
           restoreActivePluginRegistrySnapshot(registry);
           commitFailure?.mockRestore();
-          await fixture.dispose();
         }
       });
     },
@@ -624,42 +562,23 @@ describe("destination-owned completion", () => {
     "keeps the %s result out of unrelated conversations and channel sends",
     async (mode) => {
       await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        const fixture = await createCompletionFixture(state, "isolated");
+        await using fixture = await createCompletionFixture(state, "isolated");
         const registry = captureActivePluginRegistrySnapshot();
         const sendText = vi.fn(async () => ({ channel: "telegram", messageId: "unexpected" }));
-        setActivePluginRegistry(
-          createTestRegistry([
-            {
-              pluginId: "telegram",
-              source: "test",
-              plugin: {
-                ...createChannelTestPluginBase({ id: "telegram" }),
-                outbound: { deliveryMode: "direct", sendText },
-              },
-            },
-          ]),
-        );
+        installDestinationChannel("telegram", { deliveryMode: "direct", sendText });
         try {
           fixture.params.cfgWithAgentDefaults.session = {
             ...fixture.params.cfgWithAgentDefaults.session,
             dmScope: "per-channel-peer",
           };
-          fixture.job.delivery =
+          fixture.params.deliveryRequested = true;
+          await prepareDelivery(
+            fixture,
             mode === "no-route"
               ? { mode: "announce", channel: "last" }
-              : { mode: "announce", channel: "telegram", to: "12345" };
-          fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.job);
-          fixture.params.deliveryRequested = true;
-          if (fixture.params.deliveryRequested) {
-            fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-              fixture.params.cfgWithAgentDefaults,
-              "main",
-              { ...fixture.job, ...fixture.params.deliveryPlan },
-            );
-          }
-          const text = mode === "silent" ? undefined : "Final creator report";
-          fixture.params.deliveryPayloads = text ? [{ text }] : [];
-          fixture.params.synthesizedText = text;
+              : { mode: "announce", channel: "telegram", to: "12345" },
+          );
+          setReport(fixture, mode === "silent" ? undefined : "Final creator report");
           if (mode === "silent") {
             fixture.params.skipDelivery = "silent";
           }
@@ -675,12 +594,10 @@ describe("destination-owned completion", () => {
           } else {
             expect(await fixture.messages()).toEqual([]);
             expect(fixture.updates()).toBe(0);
-            if (mode === "silent") {
-              expect(result).toMatchObject({
-                disposition: { kind: "suppressed" },
-                deliverySuppressionReason: "silent",
-              });
-            }
+            expect(result).toMatchObject({
+              disposition: { kind: "suppressed" },
+              deliverySuppressionReason: "silent",
+            });
           }
           expect(
             loadSessionEntryReadOnly({
@@ -692,7 +609,6 @@ describe("destination-owned completion", () => {
           expect(sendText).not.toHaveBeenCalled();
         } finally {
           restoreActivePluginRegistrySnapshot(registry);
-          await fixture.dispose();
         }
       });
     },
@@ -700,7 +616,7 @@ describe("destination-owned completion", () => {
 
   it("delivers into the current destination after resets before send and between runs", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state, "isolated");
+      await using fixture = await createCompletionFixture(state, "isolated");
       const registry = captureActivePluginRegistrySnapshot();
       const destination = {
         ...fixture.scope,
@@ -716,18 +632,7 @@ describe("destination-owned completion", () => {
         dmScope: "per-channel-peer",
       };
       const sendText = vi.fn(async () => ({ channel: "telegram", messageId: "current-message" }));
-      setActivePluginRegistry(
-        createTestRegistry([
-          {
-            pluginId: "telegram",
-            source: "test",
-            plugin: {
-              ...createChannelTestPluginBase({ id: "telegram" }),
-              outbound: { deliveryMode: "direct", sendText },
-            },
-          },
-        ]),
-      );
+      installDestinationChannel("telegram", { deliveryMode: "direct", sendText });
       const tts = vi
         .spyOn(deliveryPolicy, "maybeApplyTtsToCronPayloads")
         .mockImplementationOnce(async ({ payloads }) => {
@@ -747,15 +652,8 @@ describe("destination-owned completion", () => {
           return payloads;
         });
       try {
-        fixture.params.job.delivery = { mode: "announce", channel: "telegram", to: "123" };
-        fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.params.job);
-        fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-          fixture.params.cfgWithAgentDefaults,
-          "main",
-          { ...fixture.job, ...fixture.params.deliveryPlan },
-        );
-        fixture.params.deliveryPayloads = [{ text: "Report after destination reset" }];
-        fixture.params.synthesizedText = "Report after destination reset";
+        await prepareDelivery(fixture, { mode: "announce", channel: "telegram", to: "123" });
+        setReport(fixture, "Report after destination reset");
         const result = await dispatchCronDelivery(fixture.params);
         expect(sendText).toHaveBeenCalledOnce();
         expect(result).toMatchObject({ delivered: true, deliveryError: undefined });
@@ -765,11 +663,7 @@ describe("destination-owned completion", () => {
           sessionId: "replacement-session",
           lifecycleRevision: "replacement-generation",
         });
-        const messages = await readConversationMessages(destination);
-        expect(messages).toHaveLength(1);
-        expect(readTranscriptEventMessage(messages[0])?.content).toEqual([
-          { type: "text", text: "Report after destination reset" },
-        ]);
+        await expectReport(destination, "Report after destination reset");
 
         await resetSessionEntryLifecycle({
           storePath: fixture.scope.storePath,
@@ -784,8 +678,7 @@ describe("destination-owned completion", () => {
           }),
         });
         fixture.params.runStartedAt += 1000;
-        fixture.params.deliveryPayloads = [{ text: "Next scheduled report" }];
-        fixture.params.synthesizedText = "Next scheduled report";
+        setReport(fixture, "Next scheduled report");
         expect(await dispatchCronDelivery(fixture.params)).toMatchObject({
           delivered: true,
           deliveryError: undefined,
@@ -797,16 +690,11 @@ describe("destination-owned completion", () => {
           sessionId: "next-recipient-session",
           lifecycleRevision: "next-recipient-generation",
         });
-        const nextMessages = await readConversationMessages(destination);
-        expect(nextMessages).toHaveLength(1);
-        expect(readTranscriptEventMessage(nextMessages[0])?.content).toEqual([
-          { type: "text", text: "Next scheduled report" },
-        ]);
+        await expectReport(destination, "Next scheduled report");
         expect(await fixture.messages()).toEqual([]);
       } finally {
         tts.mockRestore();
         restoreActivePluginRegistrySnapshot(registry);
-        await fixture.dispose();
       }
     });
   });
@@ -815,25 +703,14 @@ describe("destination-owned completion", () => {
     "rejects implicit %s delivery when the creator resets after route resolution",
     async (sessionTarget) => {
       await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        const fixture = await createCompletionFixture(
+        await using fixture = await createCompletionFixture(
           state,
           sessionTarget,
           "agent:main:telegram:direct:12345",
         );
         const registry = captureActivePluginRegistrySnapshot();
         const sendText = vi.fn(async () => ({ channel: "telegram", messageId: "stale-report" }));
-        setActivePluginRegistry(
-          createTestRegistry([
-            {
-              pluginId: "telegram",
-              source: "test",
-              plugin: {
-                ...createChannelTestPluginBase({ id: "telegram" }),
-                outbound: { deliveryMode: "direct", sendText },
-              },
-            },
-          ]),
-        );
+        installDestinationChannel("telegram", { deliveryMode: "direct", sendText });
         try {
           fixture.params.cfgWithAgentDefaults.session = {
             ...fixture.params.cfgWithAgentDefaults.session,
@@ -866,8 +743,7 @@ describe("destination-owned completion", () => {
               updatedAt: 3000,
             }),
           });
-          fixture.params.deliveryPayloads = [{ text: "Stale report" }];
-          fixture.params.synthesizedText = "Stale report";
+          setReport(fixture, "Stale report");
 
           const result = await dispatchCronDelivery(fixture.params);
           expect(result).toMatchObject({ delivered: false });
@@ -876,7 +752,6 @@ describe("destination-owned completion", () => {
           expect(await readConversationMessages(fixture.scope)).toEqual([]);
         } finally {
           restoreActivePluginRegistrySnapshot(registry);
-          await fixture.dispose();
         }
       });
     },
@@ -886,46 +761,41 @@ describe("destination-owned completion", () => {
     "records a delivery failure when the creating conversation is %s",
     async (change) => {
       await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        const fixture = await createCompletionFixture(state, "isolated");
-        try {
-          fixture.params.deliveryPayloads = [{ text: "tick" }];
-          fixture.params.synthesizedText = "tick";
-          if (change === "deleted") {
-            await deleteSessionEntryLifecycle({
-              archiveTranscript: false,
-              storePath: fixture.scope.storePath,
-              target: {
-                canonicalKey: fixture.scope.sessionKey,
-                storeKeys: [fixture.scope.sessionKey],
-              },
-            });
-          } else {
-            await resetSessionEntryLifecycle({
-              storePath: fixture.scope.storePath,
-              target: {
-                canonicalKey: fixture.scope.sessionKey,
-                storeKeys: [fixture.scope.sessionKey],
-              },
-              buildNextEntry: () => ({
-                sessionId: "replacement-session",
-                lifecycleRevision: "replacement-generation",
-                updatedAt: 3000,
-              }),
-            });
-          }
-
-          const delivery = await dispatchCronDelivery(fixture.params);
-          expect(delivery).toMatchObject({
-            delivered: false,
-            deliveryAttempted: true,
-            deliveryError: expect.stringContaining("session rebound"),
-            disposition: { kind: "error", errorKind: "delivery-target" },
+        await using fixture = await createCompletionFixture(state, "isolated");
+        setReport(fixture, "tick");
+        if (change === "deleted") {
+          await deleteSessionEntryLifecycle({
+            archiveTranscript: false,
+            storePath: fixture.scope.storePath,
+            target: {
+              canonicalKey: fixture.scope.sessionKey,
+              storeKeys: [fixture.scope.sessionKey],
+            },
           });
-          expect(await fixture.messages()).toEqual([]);
-          expect(fixture.updates()).toBe(0);
-        } finally {
-          await fixture.dispose();
+        } else {
+          await resetSessionEntryLifecycle({
+            storePath: fixture.scope.storePath,
+            target: {
+              canonicalKey: fixture.scope.sessionKey,
+              storeKeys: [fixture.scope.sessionKey],
+            },
+            buildNextEntry: () => ({
+              sessionId: "replacement-session",
+              lifecycleRevision: "replacement-generation",
+              updatedAt: 3000,
+            }),
+          });
         }
+
+        const delivery = await dispatchCronDelivery(fixture.params);
+        expect(delivery).toMatchObject({
+          delivered: false,
+          deliveryAttempted: true,
+          deliveryError: expect.stringContaining("session rebound"),
+          disposition: { kind: "error", errorKind: "delivery-target" },
+        });
+        expect(await fixture.messages()).toEqual([]);
+        expect(fixture.updates()).toBe(0);
       });
     },
   );

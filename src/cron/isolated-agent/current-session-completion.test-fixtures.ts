@@ -132,7 +132,7 @@ export async function createCompletionFixture(
     records,
     downloads: readDownloads,
     updates: () => updates,
-    dispose: async () => {
+    [Symbol.asyncDispose]: async () => {
       unsubscribe();
       await readDownloads();
     },

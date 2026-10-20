@@ -33,30 +33,12 @@ describe("resolveCronThinkingSelection scoped hydration", () => {
   });
 
   it.each([
-    {
-      provider: "ollama",
-      model: "minimax-m3:cloud",
-      agentRuntime: "openclaw",
-      thinking: "medium",
-      hasHostRow: false,
-    },
-    {
-      provider: "openai",
-      model: "gpt-5.6-luna",
-      agentRuntime: "codex",
-      thinking: "medium",
-      hasHostRow: true,
-    },
-    {
-      provider: "openai",
-      model: "gpt-5.6-luna",
-      agentRuntime: "codex",
-      thinking: "off",
-      hasHostRow: true,
-    },
-  ])(
-    "hydrates $provider/$model thinking=$thinking for $agentRuntime through the scoped owner",
-    async ({ provider, model, agentRuntime, thinking, hasHostRow }) => {
+    ["ollama", "minimax-m3:cloud", "openclaw", "medium", false],
+    ["openai", "gpt-5.6-luna", "codex", "medium", true],
+    ["openai", "gpt-5.6-luna", "codex", "off", true],
+  ] as const)(
+    "hydrates %s/%s runtime=%s thinking=%s through the scoped owner (host row=%s)",
+    async (provider, model, agentRuntime, thinking, hasHostRow) => {
       scopedThinkingCatalogMock.mockResolvedValue([{ provider, id: model, reasoning: true }]);
       const selection = await resolveCronThinkingSelection({
         cfg: {},

@@ -45,33 +45,29 @@ describe("current-session completion delivery", () => {
     "preserves %s output when committing the conversation",
     async (mode) => {
       await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        const fixture = await createCompletionFixture(state);
-        try {
-          const hasMedia = mode === "prepared-media";
-          const text = hasMedia ? undefined : "NO_REPLY";
-          fixture.params.deliveryPayloads = [
-            { text, ...(hasMedia ? { mediaUrl: fixture.payload.mediaUrl } : {}) },
-          ];
-          fixture.params.synthesizedText = text;
-          fixture.params.outputText = text;
-          fixture.params.summary = text;
+        await using fixture = await createCompletionFixture(state);
+        const hasMedia = mode === "prepared-media";
+        const text = hasMedia ? undefined : "NO_REPLY";
+        fixture.params.deliveryPayloads = [
+          { text, ...(hasMedia ? { mediaUrl: fixture.payload.mediaUrl } : {}) },
+        ];
+        fixture.params.synthesizedText = text;
+        fixture.params.outputText = text;
+        fixture.params.summary = text;
 
-          const delivery = await dispatchCronDelivery(fixture.params);
-          expect(delivery.delivered).toBe(true);
-          const messages = await fixture.messages();
-          expect(messages).toHaveLength(1);
-          const message = readTranscriptEventMessage(messages[0]);
-          expect(message?.content).toEqual([
-            { type: "text", text: hasMedia ? "report.png" : "NO_REPLY" },
+        const delivery = await dispatchCronDelivery(fixture.params);
+        expect(delivery.delivered).toBe(true);
+        const messages = await fixture.messages();
+        expect(messages).toHaveLength(1);
+        const message = readTranscriptEventMessage(messages[0]);
+        expect(message?.content).toEqual([
+          { type: "text", text: hasMedia ? "report.png" : "NO_REPLY" },
+        ]);
+        if (hasMedia) {
+          expect(readAssistantDisplayContent(message)).toEqual([
+            expect.objectContaining({ type: "image" }),
           ]);
-          if (hasMedia) {
-            expect(readAssistantDisplayContent(message)).toEqual([
-              expect.objectContaining({ type: "image" }),
-            ]);
-            expect(await fixture.records()).toHaveLength(1);
-          }
-        } finally {
-          await fixture.dispose();
+          expect(await fixture.records()).toHaveLength(1);
         }
       });
     },
@@ -79,22 +75,18 @@ describe("current-session completion delivery", () => {
 
   it("does not write a report into the creator when explicit account intent is unresolved", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state);
-      try {
-        fixture.params.job.delivery = { mode: "announce", accountId: "work" };
-        fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.params.job);
-        fixture.params.deliveryPayloads = [{ text: "Final report" }];
-        const completion = await dispatchCronDelivery(fixture.params);
-        const messages = await fixture.messages();
-        expect(messages).toEqual([]);
-        expect(completion).toMatchObject({
-          delivered: false,
-          deliveryError: "No external channel",
-          disposition: { kind: "error", errorKind: "delivery-target" },
-        });
-      } finally {
-        await fixture.dispose();
-      }
+      await using fixture = await createCompletionFixture(state);
+      fixture.params.job.delivery = { mode: "announce", accountId: "work" };
+      fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.params.job);
+      fixture.params.deliveryPayloads = [{ text: "Final report" }];
+      const completion = await dispatchCronDelivery(fixture.params);
+      const messages = await fixture.messages();
+      expect(messages).toEqual([]);
+      expect(completion).toMatchObject({
+        delivered: false,
+        deliveryError: "No external channel",
+        disposition: { kind: "error", errorKind: "delivery-target" },
+      });
     });
   });
 });
@@ -109,7 +101,7 @@ describe("current-session completion media", () => {
     "honors the real occurrence fence after $revoke before $stage",
     async ({ stage, revoke }) => {
       await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        const fixture = await createCompletionFixture(
+        await using fixture = await createCompletionFixture(
           state,
           "current",
           "agent:main:telegram:direct:12345",
@@ -266,7 +258,6 @@ describe("current-session completion media", () => {
           admission.mockRestore();
           tts.mockRestore();
           restoreActivePluginRegistrySnapshot(registry);
-          await fixture.dispose();
         }
       });
     },
@@ -274,7 +265,7 @@ describe("current-session completion media", () => {
 
   it("publishes downloadable media and replays the original message after promotion failure", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state);
+      await using fixture = await createCompletionFixture(state);
       let restorePromotionAdmission: (() => void) | undefined;
       try {
         const spy = probe.admission(operationAdmission, (request, grant, admit) => {
@@ -322,77 +313,68 @@ describe("current-session completion media", () => {
         }
       } finally {
         restorePromotionAdmission?.();
-        await fixture.dispose();
       }
     });
   });
 
   it("preserves interleaved report text, media, and spoken-payload failure metadata", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state);
-      try {
-        const secondImage = path.join(state.workspaceDir, "second.png");
-        await fs.writeFile(secondImage, PNG);
-        fixture.params.deliveryPayloads.push(
-          setReplyPayloadMetadata(
-            {
-              spokenText: "Second report",
-              mediaUrl: secondImage,
-            },
-            {
-              assistantMediaFailures: [
-                { code: "file-not-found", kind: "image", label: "missing.png" },
-              ],
-            },
-          ),
-        );
-        await fixture.commit();
-        const message = readTranscriptEventMessage((await fixture.messages())[0]);
-        expect(readAssistantDisplayContent(message)).toEqual([
-          { type: "text", text: "Example report" },
-          expect.objectContaining({ type: "image", alt: "report.png" }),
-          { type: "text", text: "Second report" },
-          expect.objectContaining({ type: "image", alt: "second.png" }),
-          expect.objectContaining({
-            type: "attachment_error",
-            attachment: expect.objectContaining({ label: "missing.png" }),
-          }),
-        ]);
-      } finally {
-        await fixture.dispose();
-      }
+      await using fixture = await createCompletionFixture(state);
+      const secondImage = path.join(state.workspaceDir, "second.png");
+      await fs.writeFile(secondImage, PNG);
+      fixture.params.deliveryPayloads.push(
+        setReplyPayloadMetadata(
+          {
+            spokenText: "Second report",
+            mediaUrl: secondImage,
+          },
+          {
+            assistantMediaFailures: [
+              { code: "file-not-found", kind: "image", label: "missing.png" },
+            ],
+          },
+        ),
+      );
+      await fixture.commit();
+      const message = readTranscriptEventMessage((await fixture.messages())[0]);
+      expect(readAssistantDisplayContent(message)).toEqual([
+        { type: "text", text: "Example report" },
+        expect.objectContaining({ type: "image", alt: "report.png" }),
+        { type: "text", text: "Second report" },
+        expect.objectContaining({ type: "image", alt: "second.png" }),
+        expect.objectContaining({
+          type: "attachment_error",
+          attachment: expect.objectContaining({ label: "missing.png" }),
+        }),
+      ]);
     });
   });
 
   it("blocks workspace-only images beside the session store", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state);
-      try {
-        const privateImage = path.join(path.dirname(fixture.scope.storePath), "private.png");
-        await fs.mkdir(path.dirname(privateImage), { recursive: true });
-        await fs.writeFile(privateImage, PNG);
-        fixture.params.cfgWithAgentDefaults.tools = {
-          profile: "full",
-          fs: { workspaceOnly: true },
-        };
-        fixture.params.deliveryPayloads = [{ text: "Report", mediaUrl: privateImage }];
-        await expect(fixture.commit()).resolves.toMatchObject({ ok: true });
-        const message = readTranscriptEventMessage((await fixture.messages())[0]);
-        const content = readAssistantDisplayContent(message);
-        expect(content).toEqual([
-          { type: "text", text: "Report" },
-          expect.objectContaining({ type: "attachment_error" }),
-        ]);
-        expect(await fixture.records()).toHaveLength(0);
-      } finally {
-        await fixture.dispose();
-      }
+      await using fixture = await createCompletionFixture(state);
+      const privateImage = path.join(path.dirname(fixture.scope.storePath), "private.png");
+      await fs.mkdir(path.dirname(privateImage), { recursive: true });
+      await fs.writeFile(privateImage, PNG);
+      fixture.params.cfgWithAgentDefaults.tools = {
+        profile: "full",
+        fs: { workspaceOnly: true },
+      };
+      fixture.params.deliveryPayloads = [{ text: "Report", mediaUrl: privateImage }];
+      await expect(fixture.commit()).resolves.toMatchObject({ ok: true });
+      const message = readTranscriptEventMessage((await fixture.messages())[0]);
+      const content = readAssistantDisplayContent(message);
+      expect(content).toEqual([
+        { type: "text", text: "Report" },
+        expect.objectContaining({ type: "attachment_error" }),
+      ]);
+      expect(await fixture.records()).toHaveLength(0);
     });
   });
 
   it("does not prepare media when the source generation changes while waiting", async () => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      const fixture = await createCompletionFixture(state);
+      await using fixture = await createCompletionFixture(state);
       const admission = await beginSessionEffect({
         scope: fixture.scope.storePath,
         identities: [fixture.scope.sessionKey, fixture.scope.sessionId],
@@ -415,7 +397,6 @@ describe("current-session completion media", () => {
       } finally {
         admission.release();
         await commit;
-        await fixture.dispose();
       }
     });
   });

@@ -73,40 +73,17 @@ it("reads current delivery facts without decoding unrelated session payloads", a
     const parse = vi.spyOn(JSON, "parse");
     try {
       const result = await readCronDeliveryTargetContexts(cfg, requests);
-      expect(result).toMatchObject([
-        {
+      expect(result).toMatchObject(
+        ["source-recipient", "main-recipient"].map((to, index) => ({
           ok: true,
           value: {
-            usedSharedMainFallback: false,
+            usedSharedMainFallback: index === 1,
             main: {
-              delivery: {
-                context: {
-                  channel: "telegram",
-                  to: "source-recipient",
-                  accountId: "work",
-                  threadId: 0,
-                },
-              },
+              delivery: { context: { channel: "telegram", to, accountId: "work", threadId: 0 } },
             },
           },
-        },
-        {
-          ok: true,
-          value: {
-            usedSharedMainFallback: true,
-            main: {
-              delivery: {
-                context: {
-                  channel: "telegram",
-                  to: "main-recipient",
-                  accountId: "work",
-                  threadId: 0,
-                },
-              },
-            },
-          },
-        },
-      ]);
+        })),
+      );
       expect(
         parse.mock.calls.filter(([json]) => json.includes("unrelated-session-payload")),
       ).toHaveLength(0);
