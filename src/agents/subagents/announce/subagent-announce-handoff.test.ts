@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { AGENT_INTERNAL_EVENT_TYPE_TASK_COMPLETION } from "../../internal-event-contract.js";
 import type { AgentInternalEvent } from "../../internal-events.js";
 import {
@@ -6,14 +6,14 @@ import {
   isTrustedSubagentCompletionHandoffForRun,
 } from "./subagent-announce-handoff.js";
 
-const announceProvenance = {
+const provenance = {
   kind: "inter_session",
   sourceSessionKey: "agent:openclaw:subagent:child",
   sourceChannel: "internal",
   sourceTool: "subagent_announce",
 } as const;
 
-const subagentCompletionEvent: AgentInternalEvent = {
+const completion: AgentInternalEvent = {
   type: AGENT_INTERNAL_EVENT_TYPE_TASK_COMPLETION,
   source: "subagent",
   childSessionKey: "agent:openclaw:subagent:child",
@@ -26,82 +26,58 @@ const subagentCompletionEvent: AgentInternalEvent = {
   replyInstruction: "Relay this completion.",
 };
 const completionInput = {
-  inputProvenance: announceProvenance,
-  internalEvents: [subagentCompletionEvent],
+  inputProvenance: provenance,
+  internalEvents: [completion],
 };
+const forgedCompletion = { ...completion, childSessionKey: "agent:openclaw:subagent:forged" };
 
-describe("isSubagentAnnounceCompletionHandoff", () => {
-  const matches = (overrides: Parameters<typeof isSubagentAnnounceCompletionHandoff>[0] = {}) =>
-    isSubagentAnnounceCompletionHandoff({
-      ...completionInput,
-      ...overrides,
-    });
+const matches = (overrides: Parameters<typeof isSubagentAnnounceCompletionHandoff>[0] = {}) =>
+  isSubagentAnnounceCompletionHandoff({ ...completionInput, ...overrides });
 
-  it("matches an inter-session subagent completion announce", () => {
-    expect(matches()).toBe(true);
-  });
-
-  it("rejects human and non-completion inter-session turns", () => {
-    expect(matches({ inputProvenance: undefined })).toBe(false);
-    expect(
-      matches({ inputProvenance: { ...announceProvenance, sourceTool: "sessions_send" } }),
-    ).toBe(false);
-    expect(matches({ internalEvents: [] })).toBe(false);
-  });
-
-  it("keeps malformed completion announces in the broad deny class", () => {
-    expect(
-      matches({
-        internalEvents: [
-          { ...subagentCompletionEvent, childSessionKey: "agent:openclaw:subagent:forged" },
-        ],
-      }),
-    ).toBe(true);
-    expect(matches({ internalEvents: [subagentCompletionEvent, subagentCompletionEvent] })).toBe(
-      true,
-    );
-  });
+it("matches an inter-session subagent completion announce", () => {
+  expect(matches()).toBe(true);
 });
 
-describe("isTrustedSubagentCompletionHandoffForRun", () => {
-  const exact = {
-    handoff: {
-      kind: "subagent-completion",
-      sourceSessionKey: announceProvenance.sourceSessionKey,
-      sourceSessionId: subagentCompletionEvent.childSessionId,
-      targetSessionKey: "agent:main:main",
-      targetSessionId: "requester-session",
-      provider: "openai",
-      model: "glm-4.5",
-    } as const,
-    ...completionInput,
-    sessionKey: "agent:main:main",
-    sessionId: "requester-session",
+it("rejects human and non-completion inter-session turns", () => {
+  expect(matches({ inputProvenance: undefined })).toBe(false);
+  expect(matches({ inputProvenance: { ...provenance, sourceTool: "sessions_send" } })).toBe(false);
+  expect(matches({ internalEvents: [] })).toBe(false);
+});
+
+it("keeps malformed completion announces in the broad deny class", () => {
+  expect(matches({ internalEvents: [forgedCompletion] })).toBe(true);
+  expect(matches({ internalEvents: [completion, completion] })).toBe(true);
+});
+const exact = {
+  handoff: {
+    kind: "subagent-completion",
+    sourceSessionKey: provenance.sourceSessionKey,
+    sourceSessionId: completion.childSessionId,
+    targetSessionKey: "agent:main:main",
+    targetSessionId: "requester-session",
     provider: "openai",
     model: "glm-4.5",
-  };
+  } as const,
+  ...completionInput,
+  sessionKey: "agent:main:main",
+  sessionId: "requester-session",
+  provider: "openai",
+  model: "glm-4.5",
+};
 
-  it("accepts only the exact completion attempt", () => {
-    expect(isTrustedSubagentCompletionHandoffForRun(exact)).toBe(true);
-  });
+it("accepts only the exact completion attempt", () => {
+  expect(isTrustedSubagentCompletionHandoffForRun(exact)).toBe(true);
+});
 
-  it.each([
-    ["source", { inputProvenance: { ...announceProvenance, sourceSessionKey: "forged" } }],
-    [
-      "source event",
-      {
-        internalEvents: [
-          { ...subagentCompletionEvent, childSessionKey: "agent:openclaw:subagent:forged" },
-        ],
-      },
-    ],
-    ["source run", { internalEvents: [{ ...subagentCompletionEvent, childSessionId: "forged" }] }],
-    ["duplicate event", { internalEvents: [subagentCompletionEvent, subagentCompletionEvent] }],
-    ["target", { sessionKey: "agent:main:other" }],
-    ["target run", { sessionId: "replacement-session" }],
-    ["provider", { provider: "anthropic" }],
-    ["model", { model: "claude-opus-4-1" }],
-  ])("rejects a cross-%s handoff", (_name, overrides) => {
-    expect(isTrustedSubagentCompletionHandoffForRun({ ...exact, ...overrides })).toBe(false);
-  });
+it.each([
+  ["source", { inputProvenance: { ...provenance, sourceSessionKey: "forged" } }],
+  ["source event", { internalEvents: [forgedCompletion] }],
+  ["source run", { internalEvents: [{ ...completion, childSessionId: "forged" }] }],
+  ["duplicate event", { internalEvents: [completion, completion] }],
+  ["target", { sessionKey: "agent:main:other" }],
+  ["target run", { sessionId: "replacement-session" }],
+  ["provider", { provider: "anthropic" }],
+  ["model", { model: "claude-opus-4-1" }],
+])("rejects a cross-%s handoff", (_name, overrides) => {
+  expect(isTrustedSubagentCompletionHandoffForRun({ ...exact, ...overrides })).toBe(false);
 });
