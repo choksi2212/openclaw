@@ -4,10 +4,7 @@
 // so guarded hops must not hand those wrappers a dispatcher.
 import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  isWrapperOfAmbientGlobalFetch,
-  resolveFetch,
-} from "../fetch.js";
+import { isWrapperOfAmbientGlobalFetch, resolveFetch } from "../fetch.js";
 import { fetchWithSsrFGuard, type GuardedFetchOptions } from "./fetch-guard.js";
 import { isMockedFetch, type DispatcherAwareRequestInit } from "./runtime-fetch.js";
 
