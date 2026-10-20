@@ -71,6 +71,13 @@ next update's admission can record the failed outcome without waiting for the
 inactivity grace period. Live or unverifiable drivers and retained recovery
 continue to preserve their ownership.
 
+Handoff repair uses recorded boot sessions and process creation times to exclude
+prior-boot families and reused parent PIDs. Unresolved process inspection produces
+a warning naming the PID and available image, rather than blocking settlement.
+Positive handoff descendants, OpenClaw identities, and retained-runtime path
+holders still block repair. This does not relax Doctor's artifact-custody checks
+or remove retained recovery data.
+
 If the retained verifier cannot authenticate to the restarted Gateway, it stops
 retrying that rejection. Local HTTP readiness and runtime version/build identity
 can verify activation instead, with an RPC authentication warning recorded in

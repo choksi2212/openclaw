@@ -45,7 +45,12 @@ export function createManagedHandoffRecoveryFixture(root: string) {
     timeoutMs: null,
   };
   const repairFacts = vi.spyOn(cleanup, "readManagedHandoffRepairFacts").mockResolvedValue(facts);
-  const processCensus: { matchingPids: number[]; unverifiedPids: number[]; error?: string } = {
+  const processCensus: {
+    matchingPids: number[];
+    unverifiedPids: number[];
+    warnings?: string[];
+    error?: string;
+  } = {
     matchingPids: [],
     unverifiedPids: [],
   };

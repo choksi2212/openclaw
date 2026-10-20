@@ -74,7 +74,6 @@ it("records the settlement receipt before releasing a dead legacy lease and admi
 
 it.each([
   "live descendant",
-  "unverified descendant",
   "live owner",
   "unverified owner",
   "45-minute floor",
@@ -92,12 +91,6 @@ it.each([
   } else if (reason.endsWith("owner")) {
     births.set(helper.pid, reason === "live owner" ? Number(helper.startIdentity) : null);
     expected = new RegExp("live or unverified: PID " + helper.pid);
-  } else if (reason === "unverified descendant") {
-    processCensus.unverifiedPids.push(81234);
-    processCensus.error = "Retry update repair as Administrator using the same Windows account.";
-    expected = new Error(
-      `Handoff descendants remain alive or unverified: PID 81234. ${processCensus.error}`,
-    );
   } else {
     processCensus.matchingPids.push(81234);
     expected = /PID 81234.*openclaw update repair/;
@@ -109,6 +102,27 @@ it.each([
     expect(ledger.listUpdateRuns({}, { env })).toEqual([]);
   }
 });
+
+it.each([false, true])(
+  "settles warning-only process uncertainty (incomplete census: %s)",
+  async (incomplete) => {
+    fixture.seed();
+    fixture.processCensus.unverifiedPids.push(81234);
+    fixture.processCensus.warnings = [
+      "Could not verify handoff ancestry for PID 81234 (DefenderSessionHelper.exe); continuing without descendant evidence.",
+    ];
+    if (incomplete) {
+      fixture.processCensus.error = "Host process census is incomplete.";
+    }
+    using repair = await prepareRepair();
+    const run = newRun();
+    repair.bindRun(run.runId);
+    repair.complete(run.runId);
+    expect(settlement(run.runId)?.status).toBe("completed");
+    expect(nextUpdate()).toBe("acquired");
+    expect(fs.readFileSync(fixture.diagnosticPath, "utf8")).toBe("Retained update diagnostics\n");
+  },
+);
 
 it("preserves an incomplete rollback across repair state overrides", async () => {
   const previous = fixture.seed();
@@ -240,6 +254,26 @@ it("preserves interrupted repair evidence across reboot until explicit repair se
   const run = newRun();
   reclaimed.bindRun(run.runId);
   reclaimed.complete(run.runId);
+  expect(nextStore.read(fixture.root)).toEqual({ kind: "absent" });
+  expect(nextUpdate(nextStore)).toBe("acquired");
+});
+
+it("settles a prior-boot family with an unreadable recycled owner PID", async () => {
+  fixture.seed({ ageMs: 1_000 });
+  fixture.births.set(fixture.helper.pid, null);
+  const boot = fixture.store.bootIdentity();
+  vi.spyOn(bootReader, "createManagedHandoffBootIdentityReader").mockReturnValue(() => ({
+    ...boot,
+    identity:
+      boot.platform === "win32"
+        ? "2026-09-16T03:42:10.5000000Z"
+        : "01234567-89ab-cdef-0123-456789abcdee",
+  }));
+  const nextStore = createManagedHandoffLeaseStore();
+  using repair = await prepareRepair(nextStore);
+  const run = newRun();
+  repair.bindRun(run.runId);
+  repair.complete(run.runId);
   expect(nextStore.read(fixture.root)).toEqual({ kind: "absent" });
   expect(nextUpdate(nextStore)).toBe("acquired");
 });

@@ -241,9 +241,18 @@ export async function prepareManagedHandoffRepair(
   ) {
     return null;
   }
+  const boot = store.bootIdentity();
+  const familyExited = (lease: ManagedHandoffLease) => {
+    const lifetime = lease.action.kind === "triage" ? lease.action.lifetime : undefined;
+    return (
+      lifetime?.kind === "foreground" &&
+      boot.platform === lifetime.boot.platform &&
+      boot.identity !== lifetime.boot.identity
+    );
+  };
   const assertDead = () => {
     const pids = [previous, ...children]
-      .flatMap((lease) => [lease.helper, lease.executor])
+      .flatMap((lease) => (familyExited(lease) ? [] : [lease.helper, lease.executor]))
       .filter((owner) => processState(owner) !== "dead")
       .map((owner) => owner.pid);
     if (pids.length) {
@@ -277,11 +286,16 @@ export async function prepareManagedHandoffRepair(
     env,
     metadata?.facts.runIds[0],
   );
-  let facts = await inspectManagedHandoffRepairFacts(previous, discovered, metadata?.facts);
+  let facts = await inspectManagedHandoffRepairFacts(
+    previous,
+    discovered,
+    metadata?.facts,
+    familyExited(previous),
+  );
   const retainedChildren = children.filter((child) => child.key !== previous.key);
   for (const child of retainedChildren) {
     const childFacts = await readManagedHandoffRepairFacts(child, env);
-    facts = await inspectManagedHandoffRepairFacts(child, childFacts, facts);
+    facts = await inspectManagedHandoffRepairFacts(child, childFacts, facts, familyExited(child));
   }
   // Keep the original child key with its existing recovery metadata after
   // promoting an orphan to the installation's exclusive repair claim.
@@ -293,7 +307,7 @@ export async function prepareManagedHandoffRepair(
   const action: ManagedHandoffLeaseAction = {
     kind: "triage",
     phase: "running",
-    lifetime: { kind: "foreground", boot: store.bootIdentity() },
+    lifetime: { kind: "foreground", boot },
   };
   let next = rows.handle(root, {
     owner: randomUUID(),
@@ -343,7 +357,7 @@ export async function prepareManagedHandoffRepair(
         throw new Error("Handoff settlement requires its bound repair run.");
       }
       const endedAtMs = Date.now();
-      const detail = `legacy handoff lease reclaimed: owners proven dead, lease last recorded at ${new Date(previous.updatedAt).toISOString()}, no live descendants. Reclaimed keys: ${[previous.key, ...retainedChildren.map((child) => child.key)].join(", ")}. Current-installation repair completed.`;
+      const detail = `legacy handoff lease reclaimed: owners proven dead, lease last recorded at ${new Date(previous.updatedAt).toISOString()}, no verified live descendants or runtime holders. Reclaimed keys: ${[previous.key, ...retainedChildren.map((child) => child.key)].join(", ")}. Current-installation repair completed.`;
       const result = recordUpdateRunStep(
         runId,
         { step: "finalize:handoff-settlement", status: "completed", endedAtMs, detail },

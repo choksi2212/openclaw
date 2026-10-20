@@ -188,8 +188,14 @@ type HandoffReferences = {
   artifactPaths: readonly string[];
   windowsUserSid?: string;
   drivers?: readonly { pid: number; startIdentity: string }[];
+  familyExited?: boolean;
 };
-type CensusResult = { matchingPids: number[]; unverifiedPids: number[]; error?: string };
+type CensusResult = {
+  matchingPids: number[];
+  unverifiedPids: number[];
+  warnings?: string[];
+  error?: string;
+};
 type CensusProcess = { pid: number; state: string; command?: { ppid: number } & ProcessCommand };
 
 function classifyWindowsHandoffAncestry(
@@ -221,6 +227,11 @@ function classifyWindowsHandoffAncestry(
       return "descendant";
     }
     const parent = byPid.get(child.parentPid ?? 0);
+    // Equal births can be a child created in the same millisecond; only a later
+    // birth proves the current parent PID has been reused.
+    if (parent?.startIdentity && BigInt(parent.startIdentity) > BigInt(childStart)) {
+      return "unrelated";
+    }
     const driver = drivers.find(
       ({ pid, startIdentity }) =>
         pid === child.parentPid &&
@@ -233,9 +244,7 @@ function classifyWindowsHandoffAncestry(
     if (child.parentPid === 0 || child.parentPid === 4) {
       return "unrelated";
     }
-    // Persisted Windows identities have millisecond resolution; equal births
-    // cannot exclude a child created in the same clock tick.
-    if (!parent?.startIdentity || BigInt(parent.startIdentity) > BigInt(child.startIdentity)) {
+    if (!parent?.startIdentity) {
       break;
     }
     child = parent;
@@ -365,14 +374,26 @@ export function inspectOtherOpenClawProcesses(references?: HandoffReferences | s
         }
         const observation = nativeByPid.get(pid);
         const cwd = directories.get(pid);
-        const texts = [...(argv ?? []), observation?.commandLine ?? "", cwd ?? ""];
-        if (texts.some((value) => matches.test(normalize(value)))) {
+        const texts = [
+          ...(argv ?? []),
+          observation?.commandLine ?? "",
+          observation?.executable ?? "",
+          cwd ?? "",
+        ];
+        const identity = classifyOpenClawArgv(argv ?? [observation?.executable ?? ""], {
+          pid,
+          cwd: cwd ?? "",
+          serviceMarker: command && "argv" in command ? command.serviceMarker : undefined,
+          additionalEntrypoints: workerEntrypoints,
+        });
+        if (texts.some((value) => matches.test(normalize(value))) || identity.kind === "openclaw") {
           result.matchingPids.push(pid);
           continue;
         }
-        const ancestry =
-          observation &&
-          classifyWindowsHandoffAncestry(observation, nativeByPid, handoff.drivers ?? []);
+        const ancestry = handoff.familyExited
+          ? "unrelated"
+          : observation &&
+            classifyWindowsHandoffAncestry(observation, nativeByPid, handoff.drivers ?? []);
         if (ancestry === "descendant") {
           result.matchingPids.push(pid);
           continue;
@@ -400,10 +421,10 @@ export function inspectOtherOpenClawProcesses(references?: HandoffReferences | s
           )
         ) {
           result.unverifiedPids.push(pid);
-          if (windows) {
-            result.error =
-              "Please run update repair as the same Windows account that started the update.";
-          }
+          const image = observation?.executable ?? argv?.[0];
+          warnings.push(
+            `Could not verify handoff ancestry for PID ${pid} (${image ? (windows ? path.win32 : path).basename(image) : "image unavailable"}); continuing without descendant evidence.`,
+          );
         }
         continue;
       }
@@ -441,7 +462,7 @@ export function inspectOtherOpenClawProcesses(references?: HandoffReferences | s
         : "Host process census is incomplete; verify process-inspection permissions and retry update repair.";
   }
   return handoff
-    ? result
+    ? { ...result, ...(warnings.length ? { warnings } : {}) }
     : result.error
       ? { error: result.error }
       : {
