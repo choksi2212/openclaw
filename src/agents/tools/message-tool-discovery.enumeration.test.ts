@@ -3,9 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const store = vi.hoisted(() => {
   const state = {
     rows: {} as Record<string, unknown>,
-    exactReads: [] as string[],
     loadExactSessionEntryReadOnly: vi.fn((scope: { sessionKey: string }) => {
-      state.exactReads.push(scope.sessionKey);
       const entry = state.rows[scope.sessionKey];
       return entry ? { sessionKey: scope.sessionKey, entry } : undefined;
     }),
@@ -44,23 +42,33 @@ const CANONICAL_SPACE = "spaces/AAQA1bC2dEf";
 const FOLDED_SPACE = "spaces/aaqa1bc2def";
 const SESSION_KEY = `agent:main:googlechat:group:${FOLDED_SPACE}`;
 
-function seedRoutableRow() {
-  store.rows[SESSION_KEY] = {
-    sessionId: "s1",
-    updatedAt: 1,
-    delivery: {
-      kind: "external",
-      route: { channel: "googlechat", target: { to: `googlechat:${CANONICAL_SPACE}` } },
-      context: { channel: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
-      origin: { provider: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
-    },
-  };
+function resolveContext(sessionId?: string) {
+  return resolveEffectiveCurrentChannelContextForRequest(
+    { currentChannelProvider: "webchat", agentSessionKey: SESSION_KEY, sessionId },
+    { config: {}, action: "send", params: {} },
+  );
+}
+
+function expectReads(keys: string[]) {
+  expect(store.loadExactSessionEntryReadOnly.mock.calls.map(([scope]) => scope.sessionKey)).toEqual(
+    keys,
+  );
 }
 
 describe("canonical destination recovery stays bounded", () => {
   beforeEach(() => {
-    store.rows = {};
-    store.exactReads = [];
+    store.rows = {
+      [SESSION_KEY]: {
+        sessionId: "s1",
+        updatedAt: 1,
+        delivery: {
+          kind: "external",
+          route: { channel: "googlechat", target: { to: `googlechat:${CANONICAL_SPACE}` } },
+          context: { channel: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
+          origin: { provider: "googlechat", to: `googlechat:${CANONICAL_SPACE}` },
+        },
+      },
+    };
     store.loadExactSessionEntryReadOnly.mockClear();
     getChannelPluginMock.mockReset();
     getChannelPluginMock.mockReturnValue({
@@ -70,47 +78,22 @@ describe("canonical destination recovery stays bounded", () => {
   });
 
   it("recovers the canonical casing without enumerating the store", async () => {
-    seedRoutableRow();
-
-    const result = await resolveEffectiveCurrentChannelContextForRequest(
-      {
-        currentChannelProvider: "webchat",
-        agentSessionKey: SESSION_KEY,
-      },
-      { config: {}, action: "send", params: {} },
-    );
-
-    expect(result.currentChannelId).toBe(CANONICAL_SPACE);
-    expect(result.currentMessagingTarget).toBe(CANONICAL_SPACE);
-    expect(store.exactReads).toEqual([SESSION_KEY]);
+    expect(await resolveContext()).toMatchObject({
+      currentChannelId: CANONICAL_SPACE,
+      currentMessagingTarget: CANONICAL_SPACE,
+    });
+    expectReads([SESSION_KEY]);
   });
 
   it("does not recover delivery from a replacement session at the same key", async () => {
-    seedRoutableRow();
-    const result = await resolveEffectiveCurrentChannelContextForRequest(
-      {
-        currentChannelProvider: "webchat",
-        agentSessionKey: SESSION_KEY,
-        sessionId: "previous-session",
-      },
-      { config: {}, action: "send", params: {} },
-    );
+    const result = await resolveContext("previous-session");
     expect(result.currentMessagingTarget).toBe(FOLDED_SPACE);
-    expect(store.exactReads).toEqual([SESSION_KEY]);
+    expectReads([SESSION_KEY]);
   });
 
   it("reads no store at all for a channel with lowercase-canonical target ids", async () => {
     getChannelPluginMock.mockReturnValue({ messaging: { targetIdComparison: "lowercase" } });
-    seedRoutableRow();
-
-    await resolveEffectiveCurrentChannelContextForRequest(
-      {
-        currentChannelProvider: "webchat",
-        agentSessionKey: SESSION_KEY,
-      },
-      { config: {}, action: "send", params: {} },
-    );
-
-    expect(store.exactReads).toEqual([]);
+    await resolveContext();
+    expectReads([]);
   });
 });

@@ -111,9 +111,9 @@ const mocks = vi.hoisted(() => ({
         if (!scopedConfig) {
           continue;
         }
-        maybeCollectSecretPath(`channels.${scopedChannel}.token`, scopedConfig.token);
-        maybeCollectSecretPath(`channels.${scopedChannel}.botToken`, scopedConfig.botToken);
-        maybeCollectSecretPath(`channels.${scopedChannel}.appPassword`, scopedConfig.appPassword);
+        for (const field of ["token", "botToken", "appPassword"]) {
+          maybeCollectSecretPath(`channels.${scopedChannel}.${field}`, scopedConfig[field]);
+        }
         if (scopedAccountId) {
           const accountRecord =
             scopedConfig.accounts &&
@@ -126,14 +126,12 @@ const mocks = vi.hoisted(() => ({
                 >)
               : null;
           if (accountRecord) {
-            maybeCollectSecretPath(
-              `channels.${scopedChannel}.accounts.${scopedAccountId}.token`,
-              accountRecord.token,
-            );
-            maybeCollectSecretPath(
-              `channels.${scopedChannel}.accounts.${scopedAccountId}.botToken`,
-              accountRecord.botToken,
-            );
+            for (const field of ["token", "botToken"]) {
+              maybeCollectSecretPath(
+                `channels.${scopedChannel}.accounts.${scopedAccountId}.${field}`,
+                accountRecord[field],
+              );
+            }
           }
         }
       }
@@ -249,26 +247,18 @@ vi.mock("./cron-tool.js", () => ({
 vi.mock("./gateway-tool.js", () => ({
   createGatewayTool: () => openClawToolsFactoryMocks.tool("gateway"),
 }));
-vi.mock("./image-generate-tool.js", () => ({
-  createImageGenerateTool: () => null,
-}));
-vi.mock("./image-tool.js", () => ({
-  createImageTool: () => null,
-}));
+vi.mock("./image-generate-tool.js", () => ({ createImageGenerateTool: () => null }));
+vi.mock("./image-tool.js", () => ({ createImageTool: () => null }));
 vi.mock("./manifest-capability-availability.js", () => ({
   hasSnapshotCapabilityAvailability: () => false,
   hasSnapshotProviderEnvAvailability: () => false,
   loadCapabilityMetadataSnapshot: () => ({ index: {}, plugins: [] }),
 }));
-vi.mock("./music-generate-tool.js", () => ({
-  createMusicGenerateTool: () => null,
-}));
+vi.mock("./music-generate-tool.js", () => ({ createMusicGenerateTool: () => null }));
 vi.mock("./nodes-tool.js", () => ({
   createNodesTool: () => openClawToolsFactoryMocks.tool("nodes"),
 }));
-vi.mock("./pdf-tool.js", () => ({
-  createPdfTool: () => null,
-}));
+vi.mock("./pdf-tool.js", () => ({ createPdfTool: () => null }));
 vi.mock("./session-status-tool.js", () => ({
   createSessionStatusTool: () => openClawToolsFactoryMocks.tool("session_status"),
 }));
@@ -293,25 +283,30 @@ vi.mock("./subagents-tool.js", () => ({
 vi.mock("./tts-tool.js", () => ({
   createTtsTool: () => openClawToolsFactoryMocks.tool("tts"),
 }));
-vi.mock("./video-generate-tool.js", () => ({
-  createVideoGenerateTool: () => null,
-}));
+vi.mock("./video-generate-tool.js", () => ({ createVideoGenerateTool: () => null }));
 vi.mock("./web-tools.js", () => ({
   createWebFetchTool: () => openClawToolsFactoryMocks.tool("web_fetch"),
   createWebSearchTool: () => openClawToolsFactoryMocks.tool("web_search"),
 }));
 
-function mockSendResult(overrides: { channel?: string; to?: string } = {}) {
-  mocks.runMessageAction.mockClear();
-  mocks.runMessageAction.mockResolvedValue({
+function makeSendResult(
+  overrides: Partial<Extract<MessageActionResult, { kind: "send" }>> = {},
+): MessageActionResult {
+  return {
     kind: "send",
     action: "send",
-    channel: overrides.channel ?? "telegram",
-    to: overrides.to ?? "telegram:123",
+    channel: "telegram",
+    to: "telegram:123",
     handledBy: "plugin",
     payload: {},
     dryRun: true,
-  } satisfies MessageActionResult);
+    ...overrides,
+  };
+}
+
+function mockSendResult(overrides: { channel?: string; to?: string } = {}) {
+  mocks.runMessageAction.mockClear();
+  mocks.runMessageAction.mockResolvedValue(makeSendResult(overrides));
 }
 
 function getToolProperties(tool: ReturnType<CreateMessageTool>) {
@@ -320,15 +315,6 @@ function getToolProperties(tool: ReturnType<CreateMessageTool>) {
 
 function getActionEnum(properties: Record<string, unknown>) {
   return (properties.action as { enum?: string[] } | undefined)?.enum ?? [];
-}
-
-function expectStringSchema(
-  schema: unknown,
-  expected?: {
-    description?: string;
-  },
-) {
-  expect(schema).toMatchObject({ type: "string", ...expected });
 }
 
 const { runMessageAction: actualRunMessageAction } = await vi.importActual<
@@ -451,20 +437,17 @@ describe("message tool gateway timeout", () => {
     async (dryRun) => {
       const notice = "The normalized message was delivered; do not retry.";
       const receipt = dryRun ? "Prepared reply" : "Sent reply";
-      mocks.runMessageAction.mockResolvedValue({
-        kind: "send",
-        action: "send",
-        channel: "telegram",
-        to: "telegram:123",
-        handledBy: "plugin",
-        payload: { ok: true },
-        normalization: { locationOmitted: true, notice },
-        toolResult: {
-          content: [{ type: "text", text: receipt }],
-          details: { dryRun },
-        },
-        dryRun,
-      } satisfies MessageActionResult);
+      mocks.runMessageAction.mockResolvedValue(
+        makeSendResult({
+          payload: { ok: true },
+          normalization: { locationOmitted: true, notice },
+          toolResult: {
+            content: [{ type: "text", text: receipt }],
+            details: { dryRun },
+          },
+          dryRun,
+        }),
+      );
 
       const { result } = await executeSendWithResult({
         action: { channel: "telegram", target: "telegram:123", message: "hello", dryRun },
@@ -497,16 +480,14 @@ describe("message tool gateway timeout", () => {
         },
       },
     };
-    mocks.runMessageAction.mockResolvedValue({
-      kind: "send",
-      action: "send",
-      channel: "telegram",
-      to: "telegram:123",
-      handledBy: "core",
-      payload: sendResult,
-      sendResult,
-      dryRun: false,
-    } satisfies MessageActionResult);
+    mocks.runMessageAction.mockResolvedValue(
+      makeSendResult({
+        handledBy: "core",
+        payload: sendResult,
+        sendResult,
+        dryRun: false,
+      }),
+    );
 
     const { result } = await executeSendWithResult({
       action: { channel: "telegram", target: "telegram:123", message: "hello" },
@@ -542,28 +523,27 @@ describe("message tool gateway timeout", () => {
   ])(
     "records final external delivery for $name",
     async ({ route, final, expected, partial, dryRun, plugin, webchat }) => {
-      mocks.runMessageAction.mockResolvedValue({
-        kind: "send",
-        action: "send",
-        channel: "telegram",
-        to: webchat ? "123" : "telegram:123",
-        handledBy: plugin ? "plugin" : "core",
-        payload: {
-          sourceReplyRoute: route,
-          messageId: "message-1",
-          ...(partial ? { status: "partial_failed" } : {}),
-        },
-        sendResult: {
-          channel: "telegram",
-          to: "telegram:123",
-          via: "direct",
-          mediaUrl: null,
-          deliveryStatus: partial ? "partial_failed" : "sent",
+      mocks.runMessageAction.mockResolvedValue(
+        makeSendResult({
+          to: webchat ? "123" : "telegram:123",
+          handledBy: plugin ? "plugin" : "core",
+          payload: {
+            sourceReplyRoute: route,
+            messageId: "message-1",
+            ...(partial ? { status: "partial_failed" } : {}),
+          },
+          sendResult: {
+            channel: "telegram",
+            to: "telegram:123",
+            via: "direct",
+            mediaUrl: null,
+            deliveryStatus: partial ? "partial_failed" : "sent",
+            dryRun: dryRun === true,
+            result: { channel: "telegram", messageId: "message-1" },
+          },
           dryRun: dryRun === true,
-          result: { channel: "telegram", messageId: "message-1" },
-        },
-        dryRun: dryRun === true,
-      } satisfies MessageActionResult);
+        }),
+      );
 
       const { result } = await executeSendWithResult({
         action: { message: "hello", final },
@@ -616,14 +596,9 @@ describe("poll vote echo guard", () => {
       createChannelPlugin({
         id: "imessage",
         actions: ["poll-vote"],
-        config: {
-          listAccountIds: () => ["primary", "secondary"],
-        },
+        config: { listAccountIds: () => ["primary", "secondary"] },
         messageActionTargetAliases: {
-          "poll-vote": {
-            aliases: ["chatGuid"],
-            deliveryTargetAliases: ["chatGuid"],
-          },
+          "poll-vote": { aliases: ["chatGuid"], deliveryTargetAliases: ["chatGuid"] },
         },
       }),
     );
@@ -641,15 +616,7 @@ describe("poll vote echo guard", () => {
             },
             dryRun: false,
           } as MessageActionResult)
-        : ({
-            kind: "send",
-            channel: "imessage",
-            action: "send",
-            to: currentChat,
-            handledBy: "plugin",
-            payload: {},
-            dryRun: false,
-          } as MessageActionResult),
+        : makeSendResult({ channel: "imessage", to: currentChat, dryRun: false }),
     );
     return createMessageTool({
       currentChannelProvider: "imessage",
@@ -741,11 +708,7 @@ describe("poll vote echo guard", () => {
 
     const targetTool = createPollVoteTool();
     await castBlueVote(targetTool, { chatGuid: "iMessage;-;+15559998888" });
-    await targetTool.execute("send", {
-      action: "send",
-      channel: "imessage",
-      message: "Blue",
-    });
+    await targetTool.execute("send", { action: "send", channel: "imessage", message: "Blue" });
     expect(mocks.runMessageAction).toHaveBeenCalledTimes(4);
 
     const conflictingTool = createPollVoteTool();
@@ -785,11 +748,7 @@ describe("poll vote echo guard", () => {
       channel: "imessage",
       message: "Blue, because it matches our theme",
     });
-    await tool.execute("send-2", {
-      action: "send",
-      channel: "imessage",
-      message: "Blue",
-    });
+    await tool.execute("send-2", { action: "send", channel: "imessage", message: "Blue" });
 
     expect(mocks.runMessageAction).toHaveBeenCalledTimes(3);
   });
@@ -867,19 +826,9 @@ describe("message tool secret scoping", () => {
   it("keeps the Codex final control out of delivery and retry idempotency", async () => {
     mocks.runMessageAction
       .mockRejectedValueOnce(new Error("gateway timeout"))
-      .mockResolvedValueOnce({
-        kind: "send",
-        action: "send",
-        channel: "telegram",
-        to: "telegram:123",
-        handledBy: "plugin",
-        payload: {},
-        dryRun: true,
-      } satisfies MessageActionResult);
+      .mockResolvedValueOnce(makeSendResult());
 
-    const tool = createMessageTool({
-      runId: "run-message-tool",
-    });
+    const tool = createMessageTool({ runId: "run-message-tool" });
 
     await expect(
       tool.execute("message_111_1", {
@@ -946,11 +895,7 @@ describe("message tool secret scoping", () => {
         to: "123",
         final: false,
       });
-      await tool.execute("message_terminal", {
-        action: "send",
-        message: "done",
-        to: "123",
-      });
+      await tool.execute("message_terminal", { action: "send", message: "done", to: "123" });
 
       const [progress, terminal] = mocks.runMessageAction.mock.calls.map((call) => call[0]);
       expect(progress?.sourceReplyFinal).toBe(false);
@@ -976,10 +921,7 @@ describe("message tool secret scoping", () => {
       runId: "run-source-less",
       sessionId: "session-source-less",
       sessionKey,
-      toolContext: {
-        currentChannelProvider: "telegram",
-        currentChannelId: "scheduled",
-      },
+      toolContext: { currentChannelProvider: "telegram", currentChannelId: "scheduled" },
     });
     mintedTurnCapabilities.push(sourceLessCapability);
     const createSourceLessTool = (messageActionTurnCapability?: string) =>
@@ -1056,9 +998,7 @@ describe("message tool secret scoping", () => {
         }),
     );
 
-    const tool = createMessageTool({
-      runId: "run-message-tool",
-    });
+    const tool = createMessageTool({ runId: "run-message-tool" });
 
     const firstResult = tool.execute("message_111_1", {
       action: "send",
@@ -1081,15 +1021,7 @@ describe("message tool secret scoping", () => {
       expect(first?.params?.idempotencyKey).not.toBe(second?.params?.idempotencyKey);
     } finally {
       for (const resolve of pending) {
-        resolve({
-          kind: "send",
-          action: "send",
-          channel: "telegram",
-          to: "telegram:123",
-          handledBy: "plugin",
-          payload: {},
-          dryRun: true,
-        });
+        resolve(makeSendResult());
       }
       await results;
     }
@@ -1521,10 +1453,7 @@ describe("message tool secret scoping", () => {
       agentAccountId: "ops",
     });
 
-    await tool.execute("1", {
-      action: "send",
-      message: "hi",
-    });
+    await tool.execute("1", { action: "send", message: "hi" });
 
     const secretResolveCall = latestSecretResolveCall();
     expect(secretResolveCall.config).toBe(rawConfig);
@@ -1653,9 +1582,7 @@ describe("message tool explicit target guard", () => {
     try {
       registerPlugins(workspaceTestPlugin);
       mocks.runMessageAction.mockImplementationOnce(actualRunMessageAction as never);
-      const tool = createMessageTool({
-        config: workspaceConfig,
-      });
+      const tool = createMessageTool({ config: workspaceConfig });
       const result = await withGatewayToolCallerIdentity(identity, () =>
         tool.execute("invalid-broadcast-target", {
           action: "broadcast",
@@ -1826,10 +1753,7 @@ describe("message tool loop detection action runner proof", () => {
             id: `qa-message-${callIndex}`,
             accountId: "default",
             direction: "outbound",
-            conversation: {
-              id: "loop-room",
-              chatType: "channel",
-            },
+            conversation: { id: "loop-room", chatType: "channel" },
             senderId: "openclaw",
             text: "same visible reply",
             timestamp: 1_800_000_000_000 + callIndex,
@@ -1860,9 +1784,7 @@ describe("message tool loop detection action runner proof", () => {
       const result = await wrappedTool.execute(`message-tool-send-${i}`, params);
       expect(result.details).toMatchObject({
         message: {
-          conversation: {
-            id: "loop-room",
-          },
+          conversation: { id: "loop-room" },
           text: "same visible reply",
         },
       });
@@ -1870,10 +1792,7 @@ describe("message tool loop detection action runner proof", () => {
 
     const blocked = await wrappedTool.execute(`message-tool-send-${CRITICAL_THRESHOLD}`, params);
     expect(mocks.runMessageAction).toHaveBeenCalledTimes(CRITICAL_THRESHOLD);
-    expect(blocked.details).toMatchObject({
-      status: "blocked",
-      deniedReason: "tool-loop",
-    });
+    expect(blocked.details).toMatchObject({ status: "blocked", deniedReason: "tool-loop" });
     const blockedDetails = blocked.details as { reason?: unknown } | undefined;
     expect(String(blockedDetails?.reason)).toContain("CRITICAL");
 
@@ -1895,10 +1814,7 @@ describe("message tool schema scoping", () => {
     actions: ["send", "react", "poll"],
     capabilities: ["presentation"],
     toolSchema: () => [
-      {
-        properties: createTelegramPollExtraToolSchemas(),
-        visibility: "all-configured",
-      },
+      { properties: createTelegramPollExtraToolSchemas(), visibility: "all-configured" },
     ],
   });
 
@@ -1936,12 +1852,9 @@ describe("message tool schema scoping", () => {
         pollPublic: false,
       }),
     ).toBe(true);
-    expect(
-      Value.Check(tool.parameters, {
-        action: "poll",
-        pollDurationSeconds: "invalid",
-      }),
-    ).toBe(false);
+    expect(Value.Check(tool.parameters, { action: "poll", pollDurationSeconds: "invalid" })).toBe(
+      false,
+    );
   });
 
   it("uses discovery account scope for capability-gated presentation", () => {
@@ -2013,7 +1926,7 @@ describe("message tool schema scoping", () => {
           expect(properties).not.toHaveProperty("teamId");
           continue;
         }
-        expectStringSchema(properties.teamId);
+        expect(properties.teamId).toMatchObject({ type: "string" });
         expect(Value.Check(tool.parameters, { action })).toBe(true);
         for (const teamId of ["11111111-1111-1111-1111-111111111111", "T11111111"]) {
           expect(Value.Check(tool.parameters, { action, teamId })).toBe(true);
@@ -2111,9 +2024,7 @@ describe("message tool cross-channel schema", () => {
       actions: ["send", "react"],
       toolSchema: {
         actions: [],
-        properties: {
-          emoji: Type.Optional(Type.String()),
-        },
+        properties: { emoji: Type.Optional(Type.String()) },
       },
     });
 
@@ -2173,91 +2084,49 @@ describe("message tool cross-channel schema", () => {
 });
 
 describe("message tool reasoning tag sanitization", () => {
+  function makePresentation(text: (label: string) => string) {
+    return {
+      title: text("Deploy ready"),
+      blocks: [
+        { type: "text", text: text("Ship it") },
+        {
+          type: "buttons",
+          buttons: [
+            {
+              label: text("Approve"),
+              action: { type: "command", command: "/codex approve" },
+              value: "approve",
+            },
+          ],
+        },
+        {
+          type: "select",
+          placeholder: text("Pick a lane"),
+          options: [{ label: text("Main"), value: "main" }],
+        },
+        {
+          type: "chart",
+          chartType: "line",
+          title: text("Latency"),
+          categories: [text("Monday")],
+          series: [{ name: text("p95"), values: [250] }],
+          xLabel: text("Day"),
+          yLabel: text("Milliseconds"),
+        },
+        {
+          type: "chart",
+          chartType: "pie",
+          title: "Traffic",
+          segments: [{ label: text("Primary"), value: 1 }],
+        },
+      ],
+    };
+  }
   it.each([
     {
       name: "sanitizes visible presentation text before sending",
-      presentation: {
-        title: "<think>internal title</think>Deploy ready",
-        blocks: [
-          { type: "text", text: "<think>internal note</think>Ship it" },
-          {
-            type: "buttons",
-            buttons: [
-              {
-                label: "<think>button rationale</think>Approve",
-                action: { type: "command", command: "/codex approve" },
-                value: "approve",
-              },
-            ],
-          },
-          {
-            type: "select",
-            placeholder: "<think>selection rationale</think>Pick a lane",
-            options: [
-              {
-                label: "<think>option rationale</think>Main",
-                value: "main",
-              },
-            ],
-          },
-          {
-            type: "chart",
-            chartType: "line",
-            title: "<think>chart rationale</think>Latency",
-            categories: ["<think>category rationale</think>Monday"],
-            series: [
-              {
-                name: "<think>series rationale</think>p95",
-                values: [250],
-              },
-            ],
-            xLabel: "<think>axis rationale</think>Day",
-            yLabel: "<think>axis rationale</think>Milliseconds",
-          },
-          {
-            type: "chart",
-            chartType: "pie",
-            title: "Traffic",
-            segments: [{ label: "<think>segment rationale</think>Primary", value: 1 }],
-          },
-        ],
-      },
-      expected: {
-        title: "Deploy ready",
-        blocks: [
-          { type: "text", text: "Ship it" },
-          {
-            type: "buttons",
-            buttons: [
-              {
-                label: "Approve",
-                action: { type: "command", command: "/codex approve" },
-                value: "approve",
-              },
-            ],
-          },
-          {
-            type: "select",
-            placeholder: "Pick a lane",
-            options: [{ label: "Main", value: "main" }],
-          },
-          {
-            type: "chart",
-            chartType: "line",
-            title: "Latency",
-            categories: ["Monday"],
-            series: [{ name: "p95", values: [250] }],
-            xLabel: "Day",
-            yLabel: "Milliseconds",
-          },
-          {
-            type: "chart",
-            chartType: "pie",
-            title: "Traffic",
-            segments: [{ label: "Primary", value: 1 }],
-          },
-        ],
-      },
+      presentation: makePresentation((label) => `<think>internal rationale</think>${label}`),
+      expected: makePresentation((label) => label),
     },
     {
       name: "sanitizes mixed-case table captions, headers, and string cells",
@@ -2713,10 +2582,7 @@ describe("message tool sandbox passthrough", () => {
           currentChannelProvider: "discord",
           currentChannelId: "forged-current",
         },
-        action: {
-          target: "discord:123",
-          message: "hi",
-        },
+        action: { target: "discord:123", message: "hi" },
       });
 
       if (!trusted) {

@@ -25,9 +25,7 @@ vi.mock("../../llm/stream.js", async () => {
   return { ...actual, complete: completeMock };
 });
 
-vi.mock("../provider-stream.js", () => ({
-  registerProviderStreamForModel: vi.fn(),
-}));
+vi.mock("../provider-stream.js", () => ({ registerProviderStreamForModel: vi.fn() }));
 
 vi.mock("../openclaw-plugin-tools.js", () => ({
   resolveOpenClawPluginToolsForOptions: () => [],
