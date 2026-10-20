@@ -8,6 +8,7 @@ import { loadChatHistory } from "./chat-history.ts";
 import { makeChatPageHost } from "./chat-pending-inputs.test-support.ts";
 import { handlePageGatewayEvent } from "./chat-state-events.ts";
 import { admitChatSubmission } from "./history-merge.ts";
+import { admitInitialChatSubmission } from "./run-lifecycle.ts";
 import { applyChatCacheSnapshot } from "./session-message-cache.ts";
 import { buildInitialChatSubmission } from "./user-message-content.ts";
 
@@ -57,6 +58,28 @@ function initialSubmissionFixture() {
 }
 
 describe("initial submission lifecycle", () => {
+  it("adopts the acknowledged first run when a cached receipt retires its display", () => {
+    const sessionKey = "agent:main:cached-receipt";
+    const host = makeChatPageHost({ sessionKey, requestHandlers: {} });
+    const client = expectDefined(host.client, "connected client");
+    host.chatSubmissions.retain(
+      buildInitialChatSubmission(sessionKey, { text: "first", createdAt: 1 }, client, "first-run"),
+    );
+    host.chatMessages = [
+      {
+        role: "user",
+        content: "first",
+        timestamp: 2,
+        __openclaw: { id: "persisted-first", idempotencyKey: "first-run:user", seq: 1 },
+      },
+    ];
+
+    admitInitialChatSubmission(host, undefined);
+
+    expect(host.chatSubmissions.readInitial(sessionKey, client)?.pending).toBe(false);
+    expect(host.chatRunId).toBe("first-run");
+  });
+
   it("preserves cache-only resets and binds the first authoritative physical session", async () => {
     const { host, input, retained, replace } = initialSubmissionFixture();
     applyChatCacheSnapshot(host, {

@@ -34,6 +34,7 @@ import { chatRunPresentation } from "./chat-run-presentation.ts";
 import { readChatSessionActionAccess } from "./chat-session-action-access.ts";
 import { formatConnectError } from "./connect-error.ts";
 import {
+  admitChatSubmission,
   getChatSessionProjection,
   reduceChatSessionProjection,
   setChatRunOwner,
@@ -200,16 +201,24 @@ export function adoptStartedChatRun(
   }
 }
 
-/** sessions.create acknowledged the first turn the way chat.send does; adopt
- *  its run before roster events catch up so the working claw never drops. */
-export function adoptInitialChatRun(host: Parameters<typeof adoptStartedChatRun>[0]): void {
+/** Admit the retained first prompt, then adopt the run sessions.create acknowledged
+ *  (like a chat.send ACK) so the working claw never waits for roster events.
+ *  Read the run first: a cached receipt retires the display submission. */
+export function admitInitialChatSubmission(
+  host: Parameters<typeof adoptStartedChatRun>[0] & Parameters<typeof admitChatSubmission>[0],
+  pendingInputs: Parameters<typeof admitChatSubmission>[1],
+): void {
   const initial = host.chatSubmissions?.readInitial(
     host.sessionKey,
     host.client ?? null,
     host.currentSessionId,
   );
-  if (initial?.pending && !host.chatRunId) {
-    adoptStartedChatRun(host, initial.pendingRunId, initial.message.timestamp);
+  const run = initial?.pending
+    ? { id: initial.pendingRunId, startedAt: initial.message.timestamp }
+    : undefined;
+  admitChatSubmission(host, pendingInputs);
+  if (run && !host.chatRunId) {
+    adoptStartedChatRun(host, run.id, run.startedAt);
   }
 }
 
