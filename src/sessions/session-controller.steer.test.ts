@@ -53,14 +53,16 @@ type QueueMessage = (
 ) => Promise<void>;
 
 /** One running turn whose backend injection behavior is chosen per case. */
-function startTurn(params: {
-  queueMessage: QueueMessage;
-  injection?: "v2" | "legacy";
-  compacting?: boolean;
-  nativeCommitSupport?: false;
-  target?: SessionTarget;
-  adapter?: SessionControllerSourceAdapter;
-}) {
+function startTurn(
+  params: {
+    queueMessage?: QueueMessage;
+    injection?: "v2" | "legacy";
+    compacting?: boolean;
+    nativeCommitSupport?: false;
+    target?: SessionTarget;
+    adapter?: SessionControllerSourceAdapter;
+  } = {},
+) {
   const sessionKey = params.target?.sessionKey ?? key;
   const operation = createReplyOperation({
     sessionKey,
@@ -70,7 +72,7 @@ function startTurn(params: {
   });
   operation.setPhase("running");
   const queueMessage = (text: string, options?: Parameters<QueueMessage>[0]) =>
-    params.queueMessage(options ?? {}, text);
+    (params.queueMessage ?? (async () => {}))(options ?? {}, text);
   const backend = {
     kind: "embedded",
     runId: "steer-run",
@@ -125,6 +127,22 @@ function startTurn(params: {
 const steer = (input: SessionControllerInput) =>
   submitSessionControllerSteer({ input, text: "steer", options: { steeringMode: "all" } });
 
+function directSteer(
+  operation: ReturnType<typeof startTurn>["operation"],
+  options: ReplyMessageInjectionOptions = {},
+  text = "steer",
+) {
+  return steerSessionControllerOperation({ operation, text, options });
+}
+function transcriptOptions(text: string, idempotencyKey: string): ReplyMessageInjectionOptions {
+  return {
+    userTurnTranscriptRecorder: createUserTurnTranscriptRecorder({
+      input: { text, idempotencyKey },
+      target: () => undefined,
+    }),
+  };
+}
+
 function expectQueued(input: SessionControllerInput) {
   expect(input.phase).toBe("preparing");
   expect(input.retirementRequested).toBeUndefined();
@@ -134,9 +152,8 @@ function expectQueued(input: SessionControllerInput) {
 describe("submitSessionControllerSteer", () => {
   it("preserves the published backend transcript-wait contract without a native capability observation", async () => {
     const received: unknown[] = [];
-    const operation: NonNullable<AgentHarnessAttemptParams["replyOperation"]> = startTurn({
-      queueMessage: async () => {},
-    }).operation;
+    const operation: NonNullable<AgentHarnessAttemptParams["replyOperation"]> =
+      startTurn().operation;
     operation.attachBackend({
       kind: "embedded",
       runId: "public-backend",
@@ -368,7 +385,7 @@ describe("submitSessionControllerSteer", () => {
   it.each(["stop", "failure"] as const)(
     "preserves %s attribution when it supersedes a native yield",
     async (outcome) => {
-      const { operation } = startTurn({ queueMessage: async () => {} });
+      const { operation } = startTurn();
       operation.yield();
       if (outcome === "stop") {
         expect(operation.abortByUser()).toBe(true);
@@ -442,7 +459,7 @@ describe("submitSessionControllerSteer", () => {
   );
 
   it("does not redirect a captured steer to a replacement backend attempt", async () => {
-    const { input, operation } = startTurn({ queueMessage: async () => {} });
+    const { input, operation } = startTurn();
     const target = captureCurrentReplyMessageInjectionTarget(key);
     let injected = false;
     operation.attachBackend({
@@ -522,19 +539,13 @@ describe("steerSessionControllerOperation", () => {
     };
 
     await expect(
-      steerSessionControllerOperation({
-        operation,
-        text: "steer",
-        options: { ...options, waitForTranscriptCommit: true },
-      }),
+      directSteer(operation, { ...options, waitForTranscriptCommit: true }),
     ).resolves.toMatchObject({ status: "rejected", reason: "transcript_commit_wait_unsupported" });
     expect(injected).toEqual([]);
     expect(accepted).toEqual([false]);
     expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
 
-    await expect(
-      steerSessionControllerOperation({ operation, text: "steer", options }),
-    ).resolves.toMatchObject({ status: "accepted" });
+    await expect(directSteer(operation, options)).resolves.toMatchObject({ status: "accepted" });
     expect(injected).toEqual(["steer"]);
     expect(accepted).toEqual([false, true]);
     expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
@@ -558,9 +569,9 @@ describe("steerSessionControllerOperation", () => {
     retireSessionControllerInput(a.input);
     retireSessionControllerInput(b.input);
 
-    await expect(
-      steerSessionControllerOperation({ operation: a.operation, text: "only a", options: {} }),
-    ).resolves.toMatchObject({ status: "accepted" });
+    await expect(directSteer(a.operation, {}, "only a")).resolves.toMatchObject({
+      status: "accepted",
+    });
     expect(injected).toEqual(["a"]);
     expect(b.operation.abortSignal.aborted).toBe(false);
     expect(a.input.mailbox.entries).toEqual([]);
@@ -584,9 +595,7 @@ describe("steerSessionControllerOperation", () => {
       const { operation, input } = startTurn({ queueMessage });
       retireSessionControllerInput(input);
 
-      await expect(
-        steerSessionControllerOperation({ operation, text: "steer", options: {} }),
-      ).resolves.toMatchObject({ status });
+      await expect(directSteer(operation)).resolves.toMatchObject({ status });
       expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
     },
   );
@@ -605,10 +614,7 @@ describe("steerSessionControllerOperation", () => {
     });
     retireSessionControllerInput(input);
     const options = (text: string, caller: string): ReplyMessageInjectionOptions => ({
-      userTurnTranscriptRecorder: createUserTurnTranscriptRecorder({
-        input: { text, idempotencyKey: text },
-        target: () => undefined,
-      }),
+      ...transcriptOptions(text, text),
       onQueueAccepted: (value) => {
         if (value) {
           accepted.push(caller);
@@ -616,21 +622,9 @@ describe("steerSessionControllerOperation", () => {
       },
     });
 
-    const first = steerSessionControllerOperation({
-      operation,
-      text: "first",
-      options: options("first", "original"),
-    });
-    const duplicate = steerSessionControllerOperation({
-      operation,
-      text: "first",
-      options: options("first", "duplicate"),
-    });
-    const second = steerSessionControllerOperation({
-      operation,
-      text: "second",
-      options: options("second", "unrelated"),
-    });
+    const first = directSteer(operation, options("first", "original"), "first");
+    const duplicate = directSteer(operation, options("first", "duplicate"), "first");
+    const second = directSteer(operation, options("second", "unrelated"), "second");
     try {
       // Admission and injection are promise continuations; one macrotask drains them all.
       await new Promise((resolve) => {
@@ -659,17 +653,10 @@ describe("steerSessionControllerOperation", () => {
       },
     });
     retireSessionControllerInput(input);
-    const options = (): ReplyMessageInjectionOptions => ({
-      userTurnTranscriptRecorder: createUserTurnTranscriptRecorder({
-        input: { text: "guidance", idempotencyKey: "accepted-before-throw" },
-        target: () => undefined,
-      }),
-    });
+    const options = () => transcriptOptions("guidance", "accepted-before-throw");
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      await expect(
-        steerSessionControllerOperation({ operation, text: "guidance", options: options() }),
-      ).resolves.toMatchObject({
+      await expect(directSteer(operation, options(), "guidance")).resolves.toMatchObject({
         status: "indeterminate",
         targetRunId: "steer-run",
         errorMessage: "queue notification failed",
@@ -683,7 +670,7 @@ describe("steerSessionControllerOperation", () => {
     const entered = createDeferredCore();
     const resume = createDeferredCore();
     let injected = false;
-    const { operation, input } = startTurn({ queueMessage: async () => {} });
+    const { operation, input } = startTurn();
     retireSessionControllerInput(input);
     const backend: ReplyBackendHandle = {
       kind: "embedded",
@@ -748,12 +735,7 @@ describe("steerSessionControllerOperation", () => {
     if (!target) {
       throw new Error("Expected the running turn's injection target");
     }
-    const options = (): ReplyMessageInjectionOptions => ({
-      userTurnTranscriptRecorder: createUserTurnTranscriptRecorder({
-        input: { text: "guidance", idempotencyKey: "same-guidance" },
-        target: () => undefined,
-      }),
-    });
+    const options = () => transcriptOptions("guidance", "same-guidance");
     let current = true;
     const authorityError = new Error("duplicate source revoked");
     const first = await beginReplyMessageInjectionTarget(target, "guidance", options());
@@ -783,20 +765,21 @@ describe("steerSessionControllerOperation", () => {
   });
 
   it("refuses a turn that already settled without reserving input", async () => {
-    const { operation, input } = startTurn({ queueMessage: async () => {} });
+    const { operation, input } = startTurn();
     retireSessionControllerInput(input);
     operation.complete();
 
-    await expect(
-      steerSessionControllerOperation({ operation, text: "late", options: {} }),
-    ).resolves.toEqual({ status: "rejected", reason: "no_active_run" });
+    await expect(directSteer(operation, {}, "late")).resolves.toEqual({
+      status: "rejected",
+      reason: "no_active_run",
+    });
     expect(input.mailbox.entries.filter((entry) => entry.phase !== "consumed")).toEqual([]);
   });
 });
 
 describe("findSessionControllerOperationByRunId", () => {
   it("resolves the slot-owning operation by its backend run ID only while it owns the slot", () => {
-    const { operation } = startTurn({ queueMessage: async () => {} });
+    const { operation } = startTurn();
 
     expect(findSessionControllerOperationByRunId("steer-run")).toBe(operation);
     expect(findSessionControllerOperationByRunId("other-run")).toBeUndefined();

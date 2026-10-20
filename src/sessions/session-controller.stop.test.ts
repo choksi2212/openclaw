@@ -44,7 +44,37 @@ function fixture() {
       protocolRunId,
       policy: { mode: "followup" },
     });
-  return { sessionKey, sessionId, target, reserve };
+  const operation = (id = sessionId) =>
+    createReplyOperation({
+      sessionKey,
+      sessionId: id,
+      resetTriggered: false,
+      target: id === sessionId ? target : captureSessionTarget({ ...target, incarnation: id }),
+    });
+  const start = async (input: ReturnType<typeof reserve>, useTarget = false) => {
+    const running = createDeferredCore();
+    const release = createDeferredCore();
+    const execution = withSessionTurn(
+      {
+        sessionKey,
+        sessionId,
+        controllerInput: input,
+        ...(useTarget ? { target } : { storePath: target.storeScope }),
+      },
+      async () => {
+        running.resolve();
+        await release.promise;
+      },
+    );
+    await running.promise;
+    return { release, execution };
+  };
+  const stop = (targets = [target]) =>
+    stopSession({
+      source: "restart",
+      capture: captureSessionControllerStop({ targets }),
+    }).completed;
+  return { sessionKey, sessionId, target, reserve, operation, start, stop };
 }
 
 const policyCases = [
@@ -138,18 +168,12 @@ describe("captured session Stop", () => {
     const onInterrupt = vi.fn();
     const effect = await beginSessionEffect({ target: replacementTarget, onInterrupt });
     try {
-      const staleOutcome = await stopSession({
-        source: "restart",
-        capture: captureSessionControllerStop({ targets: [f.target] }),
-      }).completed;
+      const staleOutcome = await f.stop();
       expect(staleOutcome).toMatchObject({ aborted: false, activeCancelled: 0 });
       expect(onInterrupt).not.toHaveBeenCalled();
       expect(effect.isActive()).toBe(true);
 
-      const matchingOutcome = await stopSession({
-        source: "restart",
-        capture: captureSessionControllerStop({ targets: [replacementTarget] }),
-      }).completed;
+      const matchingOutcome = await f.stop([replacementTarget]);
       expect(matchingOutcome).toMatchObject({ aborted: true, activeCancelled: 1 });
       expect(onInterrupt).toHaveBeenCalledOnce();
       expect(effect.isActive()).toBe(false);
@@ -162,17 +186,9 @@ describe("captured session Stop", () => {
   it("leaves a replacement operation running when Stop names an older incarnation", async () => {
     const f = fixture();
     const replacementId = randomUUID();
-    const operation = createReplyOperation({
-      sessionKey: f.sessionKey,
-      sessionId: replacementId,
-      resetTriggered: false,
-      target: captureSessionTarget({ ...f.target, incarnation: replacementId }),
-    });
+    const operation = f.operation(replacementId);
     try {
-      const outcome = await stopSession({
-        source: "restart",
-        capture: captureSessionControllerStop({ targets: [f.target] }),
-      }).completed;
+      const outcome = await f.stop();
       expect(outcome).toMatchObject({ aborted: false, activeCancelled: 0 });
       expect(operation.abortSignal.aborted).toBe(false);
     } finally {
@@ -190,10 +206,7 @@ describe("captured session Stop", () => {
     const injection = beginSessionControllerSourceInjection(input);
     expect(await injection.admit()).toBe(true);
     try {
-      const outcome = await stopSession({
-        source: "restart",
-        capture: captureSessionControllerStop({ targets: [f.target] }),
-      }).completed;
+      const outcome = await f.stop();
       expect(outcome).toMatchObject({ aborted: false, activeCancelled: 0 });
       expect(input.abortSignal.aborted).toBe(false);
     } finally {
@@ -205,18 +218,10 @@ describe("captured session Stop", () => {
 
   it("still stops an operation through an incarnation it owns after rollover", async () => {
     const f = fixture();
-    const operation = createReplyOperation({
-      sessionKey: f.sessionKey,
-      sessionId: f.sessionId,
-      resetTriggered: false,
-      target: f.target,
-    });
+    const operation = f.operation();
     operation.updateSessionId(randomUUID());
     try {
-      const outcome = await stopSession({
-        source: "restart",
-        capture: captureSessionControllerStop({ targets: [f.target] }),
-      }).completed;
+      const outcome = await f.stop();
       expect(outcome).toMatchObject({ aborted: true, activeCancelled: 1 });
       expect(operation.abortSignal.aborted).toBe(true);
     } finally {
@@ -464,21 +469,7 @@ describe("captured session Stop", () => {
     async (source, cancelQueued, stopsChildren, recordsCutoff, firesHook) => {
       const f = fixture();
       const active = f.reserve("active");
-      const running = createDeferredCore();
-      const release = createDeferredCore();
-      const execution = withSessionTurn(
-        {
-          sessionKey: f.sessionKey,
-          sessionId: f.sessionId,
-          storePath: f.target.storeScope,
-          controllerInput: active,
-        },
-        async () => {
-          running.resolve();
-          await release.promise;
-        },
-      );
-      await running.promise;
+      const { release, execution } = await f.start(active);
       const queued = f.reserve("queued");
       const hookEvents: InternalHookEvent[] = [];
       const hook = vi.fn((event: InternalHookEvent) => {
@@ -548,21 +539,7 @@ describe("captured session Stop", () => {
   it("keeps user cleanup and the hook when the active run is already finishing", async () => {
     const f = fixture();
     const active = f.reserve("active");
-    const running = createDeferredCore();
-    const release = createDeferredCore();
-    const execution = withSessionTurn(
-      {
-        sessionKey: f.sessionKey,
-        sessionId: f.sessionId,
-        storePath: f.target.storeScope,
-        controllerInput: active,
-      },
-      async () => {
-        running.resolve();
-        await release.promise;
-      },
-    );
-    await running.promise;
+    const { release, execution } = await f.start(active);
     active.claim?.operation?.freezeAbort();
     const queued = f.reserve("queued");
     const hook = vi.fn();
@@ -601,21 +578,7 @@ describe("captured session Stop", () => {
   it("withdraws queued sources before signaling the active producer without stopping a successor", async () => {
     const f = fixture();
     const active = f.reserve("active");
-    const running = createDeferredCore();
-    const release = createDeferredCore();
-    const execution = withSessionTurn(
-      {
-        sessionKey: f.sessionKey,
-        sessionId: f.sessionId,
-        storePath: f.target.storeScope,
-        controllerInput: active,
-      },
-      async () => {
-        running.resolve();
-        await release.promise;
-      },
-    );
-    await running.promise;
+    const { release, execution } = await f.start(active);
     const queued = f.reserve("queued");
     const capture = captureSessionControllerStop({ targets: [f.target] });
     let successor: ReturnType<typeof f.reserve> | undefined;
@@ -650,21 +613,7 @@ describe("captured session Stop", () => {
   it("does not escalate a cancellation-retired source into an aggregate operation Stop", async () => {
     const f = fixture();
     const source = f.reserve("collected-sibling");
-    const running = createDeferredCore();
-    const release = createDeferredCore();
-    const execution = withSessionTurn(
-      {
-        sessionKey: f.sessionKey,
-        sessionId: f.sessionId,
-        storePath: f.target.storeScope,
-        controllerInput: source,
-      },
-      async () => {
-        running.resolve();
-        await release.promise;
-      },
-    );
-    await running.promise;
+    const { release, execution } = await f.start(source);
     retireSessionControllerSourceCancellation(source);
     const result = await stopSession({
       source: "client-run",
@@ -728,21 +677,7 @@ describe("captured session Stop", () => {
     async (errorPolicy) => {
       const f = fixture();
       const active = f.reserve("active");
-      const running = createDeferredCore();
-      const release = createDeferredCore();
-      const execution = withSessionTurn(
-        {
-          sessionKey: f.sessionKey,
-          sessionId: f.sessionId,
-          target: f.target,
-          controllerInput: active,
-        },
-        async () => {
-          running.resolve();
-          await release.promise;
-        },
-      );
-      await running.promise;
+      const { release, execution } = await f.start(active, true);
       const cleanupError = new Error("synthetic queued cancellation cleanup failure");
       const queued = reserveSessionControllerSource(f.sessionKey, {
         target: f.target,

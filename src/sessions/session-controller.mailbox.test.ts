@@ -31,6 +31,27 @@ import {
 } from "./session-controller.state.js";
 import { captureSessionTarget } from "./session-controller.target.js";
 const key = "agent:mailbox:test";
+function reserveSource(
+  options: Parameters<typeof reserveSessionControllerSource>[1] = { policy: { mode: "followup" } },
+) {
+  return reserveSessionControllerSource(key, options);
+}
+function activeOperation(sessionId: string) {
+  return createReplyOperation({ sessionKey: key, sessionId, resetTriggered: false });
+}
+async function releaseClaim(claim: Parameters<typeof releaseSessionControllerClaim>[0]) {
+  releaseSessionControllerClaim(claim);
+  await claim.settlement.promise;
+}
+function claimSource(input: Parameters<typeof tryClaimSessionControllerTask>[0]) {
+  const claim = tryClaimSessionControllerTask(input);
+  expect(claim).toBeDefined();
+  if (!claim) {
+    throw new Error("expected selected source claim");
+  }
+  return claim;
+}
+
 afterEach(() => {
   findSessionControllerEntry(key)?.active?.complete();
   clearFollowupQueue(key);
@@ -95,12 +116,8 @@ describe("controller mailbox scheduling", () => {
   });
 
   it("restores the selected pre-execution claim after its exact predecessor settles", async () => {
-    const selected = reserveSessionControllerSource(key, { policy: { mode: "followup" } });
-    const selectedClaim = tryClaimSessionControllerTask(selected);
-    expect(selectedClaim).toBeDefined();
-    if (!selectedClaim) {
-      throw new Error("expected selected source claim");
-    }
+    const selected = reserveSource();
+    const selectedClaim = claimSource(selected);
     const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
       policy: { mode: "followup" },
     });
@@ -110,29 +127,24 @@ describe("controller mailbox scheduling", () => {
     expect(selected.phase).toBe("claimed");
 
     const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
-    releaseSessionControllerClaim(predecessorClaim);
-    await predecessorClaim.settlement.promise;
+    await releaseClaim(predecessorClaim);
 
     await expect(predecessor.restored).resolves.toBe(true);
     expect(selected.mailbox.claim).toBe(selectedClaim);
     expect(selected.claim).toBe(selectedClaim);
     expect(selected.phase).toBe("claimed");
 
-    releaseSessionControllerClaim(selectedClaim);
-    await selectedClaim.settlement.promise;
+    await releaseClaim(selectedClaim);
   });
 
   it("keeps later injection behind a preparing tail after joining a recovery predecessor", async () => {
     const selected = earlySource();
-    const selectedClaim = tryClaimSessionControllerTask(selected);
-    if (!selectedClaim) {
-      throw new Error("expected selected source claim");
-    }
+    const selectedClaim = claimSource(selected);
     const recovery = {
       reservationId: "owed:joined-predecessor",
       policy: { mode: "followup" as const },
     };
-    const existing = reserveSessionControllerSource(key, recovery);
+    const existing = reserveSource(recovery);
     const tail = earlySource();
     const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, recovery);
     expect(predecessor.created).toBe(false);
@@ -155,8 +167,7 @@ describe("controller mailbox scheduling", () => {
     } finally {
       tailInjection.finish(false);
       laterInjection.finish(false);
-      releaseSessionControllerClaim(predecessorClaim);
-      await predecessorClaim.settlement.promise;
+      await releaseClaim(predecessorClaim);
       await predecessor.restored;
       releaseSessionControllerClaim(selectedClaim);
       retireSessionControllerInput(tail);
@@ -173,15 +184,11 @@ describe("controller mailbox scheduling", () => {
 
   it("does not restore a selected claim cancelled during its predecessor", async () => {
     const cancelled = new AbortController();
-    const selected = reserveSessionControllerSource(key, {
+    const selected = reserveSource({
       policy: { mode: "followup" },
       adapter: { signal: cancelled.signal },
     });
-    const selectedClaim = tryClaimSessionControllerTask(selected);
-    expect(selectedClaim).toBeDefined();
-    if (!selectedClaim) {
-      throw new Error("expected selected source claim");
-    }
+    const selectedClaim = claimSource(selected);
     const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
       policy: { mode: "followup" },
     });
@@ -189,50 +196,41 @@ describe("controller mailbox scheduling", () => {
     cancelled.abort(new Error("cancel selected source"));
     await expect(predecessor.restored).resolves.toBe(false);
     // Aborted admission returns its claim before independent recovery can run.
-    releaseSessionControllerClaim(selectedClaim);
-    await selectedClaim.settlement.promise;
+    await releaseClaim(selectedClaim);
     const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
-    releaseSessionControllerClaim(predecessorClaim);
-    await predecessorClaim.settlement.promise;
+    await releaseClaim(predecessorClaim);
 
     expect(selected.mailbox.claim).not.toBe(selectedClaim);
     expect(selected.retirementRequested).toBe(true);
   });
 
   it("preserves a later interrupt before restoring the selected claim", async () => {
-    const selected = reserveSessionControllerSource(key, { policy: { mode: "followup" } });
-    const selectedClaim = tryClaimSessionControllerTask(selected);
-    expect(selectedClaim).toBeDefined();
-    if (!selectedClaim) {
-      throw new Error("expected selected source claim");
-    }
+    const selected = reserveSource();
+    const selectedClaim = claimSource(selected);
     const predecessor = reserveSessionControllerClaimPredecessor(selectedClaim, {
       policy: { mode: "followup" },
     });
     const predecessorClaim = await claimSessionControllerTask(predecessor.input, () => {});
-    const interrupt = reserveSessionControllerSource(key, { policy: { mode: "interrupt" } });
+    const interrupt = reserveSource({ policy: { mode: "interrupt" } });
     const interruptClaim = claimSessionControllerTask(interrupt, () => {});
 
-    releaseSessionControllerClaim(predecessorClaim);
-    await predecessorClaim.settlement.promise;
+    await releaseClaim(predecessorClaim);
     const priorityClaim = await interruptClaim;
 
     expect(selected.mailbox.claim).toBe(priorityClaim);
     expect(selected.mailbox.claim).not.toBe(selectedClaim);
 
-    releaseSessionControllerClaim(priorityClaim);
-    await priorityClaim.settlement.promise;
+    await releaseClaim(priorityClaim);
     await expect(predecessor.restored).resolves.toBe(true);
     expect(selected.mailbox.claim).toBe(selectedClaim);
 
-    releaseSessionControllerClaim(selectedClaim);
-    await selectedClaim.settlement.promise;
+    await releaseClaim(selectedClaim);
   });
 
   it.each(["ready", "task"] as const)(
     "releases the consumed %s callback before a source retry",
     async (kind) => {
-      const input = reserveSessionControllerSource(key, { policy: { mode: "followup" } });
+      const input = reserveSource();
       const run = source("retry after preflight refusal");
       bindSessionControllerSource(input, run);
       const request = () =>
@@ -242,19 +240,16 @@ describe("controller mailbox scheduling", () => {
       try {
         const first = await request();
         expect(deferSessionControllerClaimBeforeExecution(first)).toBe(true);
-        releaseSessionControllerClaim(first);
-        await first.settlement.promise;
+        await releaseClaim(first);
         expect(input.mailbox.claim).toBeUndefined();
         const retried = await request();
         expect(retried).not.toBe(first);
         expect(retried.inputs).toContain(input);
-        releaseSessionControllerClaim(retried);
-        await retried.settlement.promise;
+        await releaseClaim(retried);
       } finally {
         const remaining = input.mailbox.claim;
         if (remaining) {
-          releaseSessionControllerClaim(remaining);
-          await remaining.settlement.promise;
+          await releaseClaim(remaining);
         }
         retireSessionControllerInput(input);
         await input.settlement.promise;
@@ -262,11 +257,7 @@ describe("controller mailbox scheduling", () => {
     },
   );
   it("runs reserved start callbacks on claim in FIFO order, never again for a joined reservation", async () => {
-    const active = createReplyOperation({
-      sessionKey: key,
-      sessionId: "start-callback-active",
-      resetTriggered: false,
-    });
+    const active = activeOperation("start-callback-active");
     active.setPhase("running");
     const started: string[] = [];
     const reserve = (id: string, reservationId?: string) =>
@@ -291,13 +282,9 @@ describe("controller mailbox scheduling", () => {
     expect(started).toEqual(["first", "second"]);
   });
   it("retires a queued injection before releasing its receipt when live authority rejects", async () => {
-    const active = createReplyOperation({
-      sessionKey: key,
-      sessionId: "active",
-      resetTriggered: false,
-    });
+    const active = activeOperation("active");
     let revoked = false;
-    const input = reserveSessionControllerSource(key, {
+    const input = reserveSource({
       policy: { mode: "followup", debounceMs: 0 },
       adapter: {
         authority: {
@@ -327,7 +314,7 @@ describe("controller mailbox scheduling", () => {
     expect(findSessionControllerEntry(key)).toBeUndefined();
   });
   it("reserves interrupt D before A settles, then keeps B,C in original order", async () => {
-    const a = createReplyOperation({ sessionKey: key, sessionId: "a", resetTriggered: false });
+    const a = activeOperation("a");
     const order: string[] = [];
     const drained = createDeferredCore();
     const dispatch = async (run: ReturnType<typeof source>) => {
@@ -338,7 +325,7 @@ describe("controller mailbox scheduling", () => {
     };
     enqueueFollowupRun(key, source("B"), { mode: "followup", debounceMs: 0 }, "none", dispatch);
     enqueueFollowupRun(key, source("C"), { mode: "followup", debounceMs: 0 }, "none", dispatch);
-    const d = reserveSessionControllerSource(key, {
+    const d = reserveSource({
       protocolRunId: " D ",
       policy: { mode: "interrupt" },
     });
@@ -354,11 +341,11 @@ describe("controller mailbox scheduling", () => {
     expect(order).toEqual(["B", "C"]);
   });
   it("canceling an older priority never clears the newest interrupt reservation", async () => {
-    const first = reserveSessionControllerSource(key, {
+    const first = reserveSource({
       protocolRunId: "old",
       policy: { mode: "interrupt" },
     });
-    const newest = reserveSessionControllerSource(key, {
+    const newest = reserveSource({
       protocolRunId: "new",
       policy: { mode: "interrupt" },
     });
@@ -368,13 +355,12 @@ describe("controller mailbox scheduling", () => {
     bindSessionControllerSource(newest, run);
     const claim = await claimSessionControllerInput(run);
     expect(claim.inputs).toEqual([newest]);
-    releaseSessionControllerClaim(claim);
-    await claim.settlement.promise;
+    await releaseClaim(claim);
     expect(Boolean(findSessionControllerEntry(key))).toBe(false);
   });
   it("preserves exact protocol identities and withdrawal custody before payload exists", () => {
     const cancel = vi.fn();
-    const input = reserveSessionControllerSource(key, {
+    const input = reserveSource({
       protocolRunId: " id ",
       policy: { mode: "followup" },
       adapter: { cancel },
@@ -390,11 +376,7 @@ describe("controller mailbox scheduling", () => {
     expect(findSessionControllerEntry(key)).toBeUndefined();
   });
   it("runs an explicit source task between collect-mode followups instead of collecting its payload", async () => {
-    const active = createReplyOperation({
-      sessionKey: key,
-      sessionId: "collect-task-predecessor",
-      resetTriggered: false,
-    });
+    const active = activeOperation("collect-task-predecessor");
     const order: string[] = [];
     const dispatch = async (run: ReturnType<typeof source>) => {
       order.push(run.prompt);
@@ -426,16 +408,14 @@ describe("controller mailbox scheduling", () => {
       }
       taskClaim = result.claim;
       expect(order).toEqual(["before task", "native task"]);
-      releaseSessionControllerClaim(taskClaim);
-      await taskClaim.settlement.promise;
+      await releaseClaim(taskClaim);
       await after.controllerInput!.settlement.promise;
       await after.controllerInput!.claim?.settlement.promise;
       expect(order).toEqual(["before task", "native task", "after task"]);
     } finally {
       active.complete();
       if (taskClaim) {
-        releaseSessionControllerClaim(taskClaim);
-        await taskClaim.settlement.promise;
+        await releaseClaim(taskClaim);
       }
       clearFollowupQueue(key);
       await Promise.allSettled(
@@ -500,7 +480,7 @@ it("clearFollowupQueue retains delayed native injection and source adoption unti
 });
 
 function earlySource(adapter?: Parameters<typeof reserveSessionControllerSource>[1]["adapter"]) {
-  return reserveSessionControllerSource(key, {
+  return reserveSource({
     protocolRunId: " exact source ",
     policy: { mode: "followup" },
     adapter,
@@ -581,7 +561,7 @@ describe("early source injection custody", () => {
 
   it("keeps a later source behind older reservations when an interrupt bypasses them", async () => {
     const first = earlySource();
-    const interrupt = reserveSessionControllerSource(key, {
+    const interrupt = reserveSource({
       protocolRunId: " interrupt ",
       policy: { mode: "interrupt" },
     });
@@ -645,8 +625,7 @@ describe("early source injection custody", () => {
     b.finish(false);
     const claim = await claimSessionControllerTask(second, () => {});
     expect(claim.inputs).toEqual([second]);
-    releaseSessionControllerClaim(claim);
-    await claim.settlement.promise;
+    await releaseClaim(claim);
   });
 
   it("keeps uncertain cancelled native work until finish and joins source cleanup", async () => {
@@ -781,8 +760,7 @@ describe("committed source withdrawal", () => {
     expect(input.abortSignal.aborted).toBe(false);
     expect(hold.commit("late callback")).toBe(false);
     expect(selected).toHaveBeenCalledOnce();
-    releaseSessionControllerClaim(claim);
-    await claim.settlement.promise;
+    await releaseClaim(claim);
   });
 });
 
@@ -840,8 +818,7 @@ describe("exact source cancellation authority", () => {
       expect(abortSessionControllerInput(input, reason)).toBe(false);
       expect(input.mailbox.entries).toContain(input);
       operation.complete();
-      releaseSessionControllerClaim(claim);
-      await claim.settlement.promise;
+      await releaseClaim(claim);
     },
   );
 
@@ -860,7 +837,6 @@ describe("exact source cancellation authority", () => {
     expect(input.abortSignal.aborted).toBe(false);
     expect(cancel).not.toHaveBeenCalled();
     operation.complete();
-    releaseSessionControllerClaim(claim);
-    await claim.settlement.promise;
+    await releaseClaim(claim);
   });
 });
