@@ -3,15 +3,11 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { flush } from "../../../test-helpers/solid-settle.ts";
-import { createTestTranscript } from "../chat-view.test-helpers.ts";
-import {
-  render,
-  renderChatThread,
-  renderTranscriptSearch,
-} from "../test-helpers/chat-transcript-native.tsx";
+import { render, renderTranscriptSearch } from "../test-helpers/chat-transcript-native.tsx";
 import { getTranscriptState, toggleTranscriptSearch } from "./chat-thread-interactions.ts";
 import {
   transcriptContainer,
+  threadFixture,
   searchableThreadFixture,
 } from "./chat-transcript-fixture.test-support.tsx";
 import {
@@ -45,64 +41,76 @@ function expectMetadata(groups: Element[], expected: boolean[]) {
   );
 }
 
+const fixtures = new Set<ReturnType<typeof threadFixture>>();
+function track<T extends ReturnType<typeof threadFixture>>(fixture: T): T {
+  fixtures.add(fixture);
+  return fixture;
+}
+function release(fixture: ReturnType<typeof threadFixture>) {
+  fixture.transcript.dispose();
+  fixture.container.remove();
+  fixtures.delete(fixture);
+}
+
 it("projects search changes without redraw callbacks or replacing its input", () => {
   const paneId = "native-search-revision";
   const state = getTranscriptState(paneId);
   const container = transcriptContainer();
   render(renderTranscriptSearch(paneId), container);
-  try {
-    expect(container.querySelector("input")).toBeNull();
-    state.search.toggle();
-    flush();
-    const input = expectDefined(
-      container.querySelector<HTMLInputElement>("input"),
-      "native search input",
-    );
-    input.focus();
-    state.search.setQuery("updated query");
-    flush();
-    expect(container.querySelector("input")).toBe(input);
-    expect(input.value).toBe("updated query");
-    expect(document.activeElement).toBe(input);
-    state.search.close();
-    flush();
-    expect(container.querySelector("input")).toBeNull();
-  } finally {
-    render(null, container);
-  }
+  expect(container.querySelector("input")).toBeNull();
+  state.search.toggle();
+  flush();
+  const input = requireElement(container, "input") as HTMLInputElement;
+  input.focus();
+  state.search.setQuery("updated query");
+  flush();
+  expect(container.querySelector("input")).toBe(input);
+  expect(input.value).toBe("updated query");
+  expect(document.activeElement).toBe(input);
+  state.search.close();
+  flush();
+  expect(container.querySelector("input")).toBeNull();
+  render(null, container);
 });
 beforeEach(installTranscriptDomMocks);
-afterEach(resetTranscriptTestDom);
+afterEach(() => {
+  fixtures.forEach(release);
+  vi.useRealTimers();
+  resetTranscriptTestDom();
+});
 
 it("keeps live metadata absent while revealing stored metadata within each transcript", async () => {
-  const firstTranscript = createTestTranscript();
-  const secondTranscript = createTestTranscript();
-  const firstContainer = transcriptContainer();
-  const secondContainer = transcriptContainer();
-  const firstProps = {
-    ...threadProps("pane-touch-first", "agent:main:first", [
-      { role: "user", content: "Stored message", timestamp: 1_000 },
-      { role: "user", content: "Second stored message", timestamp: 1_500 },
-    ]),
-    stream: "Live reply",
-    streamStartedAt: 2_000,
-  };
-  const secondProps = threadProps("pane-touch-second", "agent:main:second", [
-    { role: "assistant", content: "Other transcript", timestamp: 3_000 },
-  ]);
-  render(renderChatThread(firstProps, firstTranscript), firstContainer);
-  render(renderChatThread(secondProps, secondTranscript), secondContainer);
-  firstTranscript.start();
-  secondTranscript.start();
-  firstTranscript.update();
-  secondTranscript.update();
+  const first = track(
+    threadFixture({
+      ...threadProps(
+        "pane-touch-first",
+        "agent:main:first",
+        ["First", "Second"].map((text, i) => message("user", text, 1_000 + 500 * i)),
+      ),
+      stream: "Live reply",
+      streamStartedAt: 2_000,
+    }),
+  );
+  const second = track(
+    threadFixture(
+      threadProps("touch-second", "agent:main:second", [
+        message("assistant", "Other transcript", 3_000),
+      ]),
+    ),
+  );
+  first.rerender();
+  second.rerender();
+  first.transcript.start();
+  second.transcript.start();
+  first.transcript.update();
+  second.transcript.update();
   await flushDeferredRowPrune();
 
-  const storedGroup = requireElement(firstContainer, ".chat-group.user");
+  const storedGroup = requireElement(first.container, ".chat-group.user");
   const storedBubble = requireElement(storedGroup, ".chat-bubble");
-  const streamBubble = requireElement(firstContainer, ".chat-bubble.streaming");
+  const streamBubble = requireElement(first.container, ".chat-bubble.streaming");
   const streamGroup = requireClosest(streamBubble, ".chat-group--with-footer");
-  const secondGroup = requireElement(secondContainer, ".chat-group.assistant");
+  const secondGroup = requireElement(second.container, ".chat-group.assistant");
 
   storedBubble.dispatchEvent(new Event("pointerup", { bubbles: true }));
   expect(storedGroup.classList.contains("chat-group--meta-revealed")).toBe(false);
@@ -125,8 +133,6 @@ it("keeps live metadata absent while revealing stored metadata within each trans
     expectMetadata(groups, expected);
   }
   expect(streamGroup.querySelector(".chat-group-footer")?.childElementCount).toBe(0);
-  firstTranscript.dispose();
-  secondTranscript.dispose();
 });
 
 it("keeps the completed answer timestamp and actions when full run history is restored", async () => {
@@ -143,18 +149,14 @@ it("keeps the completed answer timestamp and actions when full run history is re
     stopReason: "stop",
     __openclaw: { id: "timestamp-answer", runId, runTerminal: true },
   });
+  const call = { type: "toolCall", id: "ask", name: "ask_user", arguments: {} };
   const work = [
-    message(
-      "assistant",
-      [{ type: "toolCall", id: "audience", name: "ask_user", arguments: {} }],
-      startedAt,
-      {
-        stopReason: "toolUse",
-        __openclaw: { id: "timestamp-call", runId },
-      },
-    ),
+    message("assistant", [call], startedAt, {
+      stopReason: "toolUse",
+      __openclaw: { id: "timestamp-call", runId },
+    }),
     message("toolResult", "Engineers — café 雪 🦞", answeredAt - 1_000, {
-      toolCallId: "audience",
+      toolCallId: "ask",
       toolName: "ask_user",
       __openclaw: { id: "timestamp-result", runId },
     }),
@@ -162,62 +164,52 @@ it("keeps the completed answer timestamp and actions when full run history is re
   const writeText = vi.fn().mockResolvedValue(undefined);
   vi.stubGlobal("navigator", { clipboard: { writeText } });
   const onSetReply = vi.fn();
-  try {
-    for (const [index, messages] of [
-      [user, answer],
-      [user, ...work, answer],
-    ].entries()) {
-      const props = {
-        ...threadProps(`pane-answer-timestamp-${index}`, sessionKey, messages),
-        showToolCalls: true,
-        onSetReply,
-        selectedSession: {
-          key: sessionKey,
-          kind: "direct" as const,
-          updatedAt: answeredAt,
-          status: "done" as const,
-          lastRunId: runId,
-          runtimeMs: 35 * 60_000 + 17_000,
-        },
-      };
-      const transcript = createTestTranscript();
-      const container = transcriptContainer();
-      try {
-        render(renderChatThread(props, transcript), container);
-        transcript.start();
-        transcript.update();
-        await vi.advanceTimersByTimeAsync(0);
-        const group = requireElement(container, ".chat-group.assistant");
-        expect(group.querySelectorAll(".chat-group-footer")).toHaveLength(1);
-        expect(group.querySelector("time")?.getAttribute("datetime")).toBe(
-          "2026-09-27T09:20:57.883Z",
-        );
-        requireElement(group, ".chat-copy-btn").click();
-        expect(writeText).toHaveBeenLastCalledWith(text);
-        requireElement(group, ".chat-reply-btn").click();
-        expect(onSetReply).toHaveBeenLastCalledWith(
-          expect.objectContaining({ sourceMessageId: "timestamp-answer", text }),
-        );
-        if (index === 1) {
-          expect(requireElement(group, ".chat-work-group").textContent).toContain(
-            "Worked for 35 minutes, 17 seconds",
-          );
-        }
-        await vi.advanceTimersByTimeAsync(1_500);
-      } finally {
-        transcript.dispose();
-        container.remove();
-      }
+  for (const [index, messages] of [
+    [user, answer],
+    [user, ...work, answer],
+  ].entries()) {
+    const props = {
+      ...threadProps(`pane-answer-timestamp-${index}`, sessionKey, messages),
+      showToolCalls: true,
+      onSetReply,
+      selectedSession: {
+        key: sessionKey,
+        kind: "direct" as const,
+        updatedAt: answeredAt,
+        status: "done" as const,
+        lastRunId: runId,
+        runtimeMs: 35 * 60_000 + 17_000,
+      },
+    };
+    const fixture = track(threadFixture(props));
+    const { transcript, container, rerender } = fixture;
+    rerender();
+    transcript.start();
+    transcript.update();
+    await vi.advanceTimersByTimeAsync(0);
+    const group = requireElement(container, ".chat-group.assistant");
+    expect(group.querySelectorAll(".chat-group-footer")).toHaveLength(1);
+    expect(group.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-27T09:20:57.883Z");
+    requireElement(group, ".chat-copy-btn").click();
+    expect(writeText).toHaveBeenLastCalledWith(text);
+    requireElement(group, ".chat-reply-btn").click();
+    expect(onSetReply).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sourceMessageId: "timestamp-answer", text }),
+    );
+    if (index === 1) {
+      expect(requireElement(group, ".chat-work-group").textContent).toContain(
+        "Worked for 35 minutes, 17 seconds",
+      );
     }
-  } finally {
-    vi.useRealTimers();
+    await vi.advanceTimersByTimeAsync(1_500);
+    release(fixture);
   }
 });
 
 it.each(["indexed", "keyed"] as const)(
   "keeps a settled %s stream replyable while search separates its following tool row",
   async (kind) => {
-    const paneId = `pane-settled-stream-reply-${kind}`;
+    const paneId = `settled-reply-${kind}`;
     const sessionKey = "agent:main:main";
     const runId = "stream-reply-run";
     const text = "Settled summary";
@@ -250,87 +242,81 @@ it.each(["indexed", "keyed"] as const)(
         }),
       ],
     };
-    const { transcript, container, searchContainer, rerender } = searchableThreadFixture(props);
-    try {
-      rerender();
-      toggleTranscriptSearch(paneId);
-      flush();
-      transcript.start();
-      const input = searchContainer.querySelector<HTMLInputElement>("input");
-      expect(input).not.toBeNull();
-      input!.value = text;
-      input!.dispatchEvent(new Event("input", { bubbles: true }));
-      await flushDeferredRowPrune();
+    const { transcript, container, searchContainer, rerender } = track(
+      searchableThreadFixture(props),
+    );
+    rerender();
+    toggleTranscriptSearch(paneId);
+    flush();
+    transcript.start();
+    const input = requireElement(searchContainer, "input") as HTMLInputElement;
+    input.value = text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushDeferredRowPrune();
 
-      const bubble = requireElement(container, ".chat-group.assistant .chat-bubble");
-      const group = requireClosest(bubble, ".chat-group");
-      const tool = requireElement(container, ".chat-group.tool");
-      expect(bubble.textContent).toContain(text);
-      expect(bubble.classList.contains("streaming")).toBe(false);
-      expect(group.querySelector(".chat-group-footer-actions")).toBeNull();
-      expect(group.querySelector(".chat-reading-indicator")).toBeNull();
-      expect(group.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
-      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
-      bubble.dispatchEvent(event);
-      expect(event.defaultPrevented).toBe(true);
-      const reply = requireElement(document, '.chat-reply-context-menu [role="menuitem"]');
-      expect(reply.textContent).toBe("Reply");
-      reply.click();
+    const bubble = requireElement(container, ".chat-group.assistant .chat-bubble");
+    const group = requireClosest(bubble, ".chat-group");
+    const tool = requireElement(container, ".chat-group.tool");
+    expect(bubble.textContent).toContain(text);
+    expect(bubble.classList.contains("streaming")).toBe(false);
+    expect(group.querySelector(".chat-group-footer-actions, .chat-reading-indicator")).toBeNull();
+    expect(group.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    bubble.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    const reply = requireElement(document, '.chat-reply-context-menu [role="menuitem"]');
+    expect(reply.textContent).toBe("Reply");
+    reply.click();
 
-      expect(onSetReply).toHaveBeenCalledOnce();
-      expect(onSetReply).toHaveBeenCalledWith({
-        messageId: bubble.dataset.messageId,
-        text,
-        senderLabel: "Molty",
-      });
-    } finally {
-      transcript.dispose();
-    }
+    expect(onSetReply).toHaveBeenCalledOnce();
+    expect(onSetReply).toHaveBeenCalledWith({
+      messageId: bubble.dataset.messageId,
+      text,
+      senderLabel: "Molty",
+    });
   },
 );
 
 it.each([true, false])(
   "keeps completed commentary a turn block only outside search results (search %s)",
   async (search) => {
-    const paneId = `pane-commentary-search-${search}`;
+    const paneId = `commentary-${search}`;
     const text = "Checked the workspace layout.";
     const props = threadProps(paneId, "agent:main:main", [
-      { role: "user", content: "Inspect the workspace", timestamp: 1_000 },
+      message("user", "Inspect the workspace", 1_000),
       message("assistant", [{ type: "text", text }], 2_000, {
         openclawStreamFallback: { replacementText: text, source: "segment", itemId: "layout" },
       }),
-      { role: "assistant", content: "Workspace looks fine.", timestamp: 3_000 },
+      message("assistant", "Workspace looks fine.", 3_000),
     ]);
-    const { transcript, container, searchContainer, rerender } = searchableThreadFixture(props);
-    try {
-      if (search) {
-        toggleTranscriptSearch(paneId);
-      }
-      transcript.start();
-      rerender();
-      if (search) {
-        const input = requireElement(searchContainer, "input") as HTMLInputElement;
-        input.value = "workspace layout";
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-      await flushDeferredRowPrune();
-
-      const group = expectDefined(
-        [...container.querySelectorAll<HTMLElement>(".chat-group.assistant")].find((element) =>
-          element.textContent?.includes(text),
-        ),
-        "commentary group",
-      );
-      expect(group.classList.contains("chat-group--turn-block")).toBe(!search);
-      expect(
-        [
-          ".chat-group-footer .chat-sender-name",
-          ".chat-group-footer .chat-group-timestamp",
-          ".chat-group-footer-actions .chat-copy-btn",
-        ].map((selector) => group.querySelector(selector) !== null),
-      ).toEqual([search, search, search]);
-    } finally {
-      transcript.dispose();
+    const { transcript, container, searchContainer, rerender } = track(
+      searchableThreadFixture(props),
+    );
+    if (search) {
+      toggleTranscriptSearch(paneId);
     }
+    transcript.start();
+    rerender();
+    if (search) {
+      const input = requireElement(searchContainer, "input") as HTMLInputElement;
+      input.value = "workspace layout";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    await flushDeferredRowPrune();
+
+    const group = expectDefined(
+      [...container.querySelectorAll<HTMLElement>(".chat-group.assistant")].find((element) =>
+        element.textContent?.includes(text),
+      ),
+      "commentary group",
+    );
+    expect(group.classList.contains("chat-group--turn-block")).toBe(!search);
+    expect(
+      [
+        ".chat-group-footer .chat-sender-name",
+        ".chat-group-footer .chat-group-timestamp",
+        ".chat-group-footer-actions .chat-copy-btn",
+      ].map((selector) => group.querySelector(selector) !== null),
+    ).toEqual([search, search, search]);
   },
 );

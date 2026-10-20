@@ -132,8 +132,7 @@ it("measures newly committed rows before observer registration using fractional 
     const commit = readConnectedTranscriptRows(container, virtualizer, rowRefs.elements);
     expect(virtualizer.elementsCache.size).toBe(0);
     expect(virtualizer.itemSizeCache.has("fractional")).toBe(false);
-    expect(commit?.()).toBe(true);
-    expect(virtualizer.itemSizeCache.get("fractional")).toBe(100.375);
+    expect([commit?.(), virtualizer.itemSizeCache.get("fractional")]).toEqual([true, 100.375]);
     expect(readConnectedTranscriptRows(container, virtualizer, rowRefs.elements)?.()).toBe(false);
   } finally {
     rowRefs.clear();

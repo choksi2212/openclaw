@@ -136,12 +136,12 @@ it.each(["none", "wheel", "programmatic"] as const)(
 );
 
 it.each([
-  { source: "auto", settled: false },
-  { source: "manual", settled: false },
-  { source: "manual", settled: true },
+  ["auto", false],
+  ["manual", false],
+  ["manual", true],
 ] as const)(
-  "allows reader takeover after retargeting $source follow (settled=$settled)",
-  async ({ source, settled }) => {
+  "allows reader takeover after retargeting %s follow (settled=%s)",
+  async (source, settled) => {
     stubAnimationFrames();
     const policy = makeChatHost({ chatHasAutoScrolled: true });
     const { container, transcript } = await mountFollow("follow-continuity", 40, {
@@ -173,16 +173,9 @@ it.each([
     ]);
   },
 );
-it.each([
-  { distance: 0, followEnabled: true, nativePending: false },
-  { distance: 8, followEnabled: true, nativePending: false },
-  { distance: 50, followEnabled: true, nativePending: false },
-  { distance: 0, followEnabled: false, nativePending: false },
-  { distance: 8, followEnabled: false, nativePending: false },
-  { distance: 0, followEnabled: true, nativePending: true },
-])(
-  "follows typing growth only from the resting end ($distance, $followEnabled, native movement pending=$nativePending)",
-  async ({ distance, followEnabled, nativePending }) => {
+it.each([[0], [8], [50], [0, false], [8, false], [0, true, true]] as const)(
+  "follows typing growth only from the resting end (distance=%s, follow=%s, pending=%s)",
+  async (distance, followEnabled = true, nativePending = false) => {
     const flushFrames = stubAnimationFrames();
     const { container, renderRows, rows } = await mountFollow(
       `typing-distance-${distance}`,
@@ -221,10 +214,7 @@ it.each([
       expect(scrollTo).not.toHaveBeenCalled();
       scrollReader(container, container.scrollTop - 100);
       scrollTo.mockClear();
-      Object.defineProperty(container, "scrollHeight", {
-        configurable: true,
-        value: total + 188,
-      });
+      setTranscriptViewport(container, total + 188);
       flushFrames();
       expect(scrollTo).not.toHaveBeenCalled();
       expect(container.scrollTop).toBe(readerOffset - 100);

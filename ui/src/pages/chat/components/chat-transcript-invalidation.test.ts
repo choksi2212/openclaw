@@ -15,6 +15,7 @@ import { createApplicationContextProvider } from "../../../test-helpers/applicat
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../../../test-helpers/solid-settle.ts";
 import {
+  activePlacementSession,
   createInitializationContext,
   createSessionCapabilityFixture,
   createTestChatPane,
@@ -36,6 +37,7 @@ import {
 } from "../test-helpers/chat-transcript-native.tsx";
 import * as chatMessage from "./chat-message-group-frame.ts";
 import { releaseChatMediaResourceOwner } from "./chat-message-media.ts";
+import { createAttachmentBlock } from "./chat-message.test-support.ts";
 import { resetTranscriptSession, toggleTranscriptSearch } from "./chat-thread-interactions.ts";
 import { ChatThread } from "./chat-thread-view.tsx";
 import { settleToolBridges } from "./chat-tool-render.test-support.ts";
@@ -233,15 +235,7 @@ describe("chat transcript invalidation", () => {
         ...threadProps("video-preview", "agent:main:video", [
           msg("user", [
             { type: "image", url: "/media/reference.png", alt: "Reference" },
-            {
-              type: "attachment",
-              attachment: {
-                kind: "video",
-                url: videoUrl,
-                label: "Recording.mp4",
-                mimeType: "video/mp4",
-              },
-            },
+            createAttachmentBlock(videoUrl, "video", "Recording.mp4", "video/mp4"),
             { type: "text", text: "Check this recording." },
           ]),
         ]),
@@ -466,21 +460,12 @@ describe("chat transcript invalidation", () => {
     const paneId = "pane-session-items";
     const messagesA = [{ role: "assistant", content: "session A", timestamp: 1_000 }];
     const messagesB = [{ role: "assistant", content: "session B", timestamp: 2_000 }];
-    const stableInputs = {
-      paneId,
-      runId: null,
-      toolMessages: [],
-      streamSegments: [],
-      stream: null,
-      streamStartedAt: null,
-      showToolCalls: true,
-    };
     const buildSpy = vi.spyOn(chatThreadBuild, "buildChatItems");
     const build = (sessionKey: string, messages: unknown[]) =>
       buildCachedChatItems({
-        ...stableInputs,
-        sessionKey,
-        messages,
+        ...threadProps(paneId, sessionKey, messages),
+        runId: null,
+        showToolCalls: true,
       });
     const itemsA = build("agent:main:session-a", messagesA);
     resetTranscriptSession(paneId);
@@ -520,13 +505,8 @@ describe("chat transcript invalidation", () => {
       props.selectedSession = {
         ...props.selectedSession,
         placement: {
-          state: "active",
-          ...timing,
+          ...activePlacementSession(props.sessionKey).placement,
           environmentId: "worker:fixture",
-          activeOwnerEpoch: 1,
-          workerBundleHash: "a".repeat(64),
-          workspaceBaseManifestRef: "base-manifest",
-          remoteWorkspaceDir: "/worker/repo",
         },
       };
       rerender();
@@ -793,19 +773,13 @@ describe("chat transcript invalidation", () => {
     const previousUserVersion = getExpansionStateVersion(staleUsers);
 
     for (let index = 0; index < 20; index += 1) {
-      const alternatePane = transcriptContainer();
-      render(
-        renderChatThread(
-          {
-            ...props,
-            paneId: `alternate-pane-${index}`,
-            sessionKey: `alternate-session-${index}`,
-          },
-          createTestTranscript(),
-        ),
-        alternatePane,
-      );
-      await settleToolBridges(alternatePane);
+      const alternate = threadFixture({
+        ...props,
+        paneId: `alternate-pane-${index}`,
+        sessionKey: `alternate-session-${index}`,
+      });
+      alternate.rerender();
+      await settleToolBridges(alternate.container);
     }
 
     render(renderChatThread(props, controller), retainedPane);

@@ -8,9 +8,7 @@ import {
 } from "./chat-transcript-offset-observer.ts";
 import { TranscriptPrependAnchor } from "./chat-transcript-prepend-anchor.ts";
 
-function rect(top: number, height: number): DOMRect {
-  return new DOMRect(0, top, 800, height);
-}
+const rect = (top: number, height: number) => new DOMRect(0, top, 800, height);
 
 function fixture(scrollHeight = 1600) {
   const scroller = document.body.appendChild(document.createElement("div"));
@@ -75,9 +73,8 @@ it("preserves a partially visible retained message rather than overscan across m
   // The first correction can mount more rows above the reader on the next commit.
   contentTop += 80;
   measureRows.mockReturnValueOnce(true);
-  const corrected = anchor.update(scroller, instance, measureRows);
+  expect(anchor.update(scroller, instance, measureRows)).toBe(true);
   expect(scroller.scrollTop).toBe(580);
-  expect(corrected).toBe(true);
   expect(anchor.update(scroller, instance, measureRows)).toBe(true);
   expect(anchor.update(scroller, instance, measureRows)).toBe(false);
 });
