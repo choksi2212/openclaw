@@ -51,7 +51,6 @@ import type {
   RuntimeAuthProfileStore,
 } from "../auth-profiles/types.js";
 import { getAgentDir } from "../config.js";
-import { assertProviderAuthSupportsHttp } from "../model-auth-runtime-shared.js";
 import { AuthStoragePersistenceError } from "./auth-storage-error.js";
 import {
   isAuthStorageOAuthRefreshFence,
@@ -743,8 +742,7 @@ export class AuthStorage {
     }
     const resolved = (apiKey: string | undefined) => ({ apiKey, source });
 
-    if (cred?.type === "api_key") {
-      assertProviderAuthSupportsHttp(cred, providerId);
+    if (cred?.type === "api_key" && !cred.nativeAuth) {
       return resolved(resolveConfigValue(cred.key));
     }
 
