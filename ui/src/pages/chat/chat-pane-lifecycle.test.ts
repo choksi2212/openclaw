@@ -333,6 +333,39 @@ it.each([
   },
 );
 
+it("does not adopt a first run bound to a replaced physical session", () => {
+  const targetSessionKey = "agent:main:created-session";
+  const client = {
+    addEventListener: vi.fn(() => vi.fn()),
+    request: vi.fn(),
+  } as unknown as GatewayBrowserClient;
+  const context = createInitializationContext();
+  context.gateway.snapshot.client = client;
+  const submission = buildInitialChatSubmission(
+    targetSessionKey,
+    { createdAt: 1, text: "first prompt for session a" },
+    client,
+    "initial-run",
+  );
+  context.chatSubmissions.retain(submission && { ...submission, sessionId: "physical-a" });
+  const pane = runtimePane(targetSessionKey, context);
+  cacheChatSessionSnapshot(
+    pane.chatMessagesBySession!,
+    { settings: context.gateway.connection, client, hello: context.gateway.snapshot.hello },
+    { sessionKey: targetSessionKey },
+    { messages: [], sessionId: "physical-b", pagination: { hasMore: false, totalMessages: 0 } },
+  );
+  const connect = stopAtAttach(pane);
+
+  try {
+    const attachedState = connect();
+    expect(attachedState?.currentSessionId).toBe("physical-b");
+    expect(attachedState?.chatRunId ?? null).toBeNull();
+  } finally {
+    pane.disconnectedCallback();
+  }
+});
+
 it.each(["absent", "open"] as const)(
   "restores its own %s layout instead of another split pane's layout",
   (preference) => {
