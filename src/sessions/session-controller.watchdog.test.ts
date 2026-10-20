@@ -22,10 +22,11 @@ import {
 
 const key = "agent:main:watchdog-boundary";
 const sessionId = "watchdog-incarnation";
+const session = { sessionKey: key, sessionId, resetTriggered: false };
 const abortMs = 6 * 60_000;
 let releasePlacementProvider: (() => void) | undefined;
 function begin() {
-  const operation = createReplyOperation({ sessionKey: key, sessionId, resetTriggered: false });
+  const operation = createReplyOperation(session);
   operation.setPhase("running");
   return operation;
 }
@@ -257,14 +258,12 @@ it.each(["backend", "attempt", "owner"] as const)(
 );
 
 it("gives resumed terminal recovery cleanup time without manufacturing semantic progress", async () => {
-  let phase: "active" | "terminal" = "active";
   const expireCleanup = vi.fn(() => "resumed" as const);
   const watchdog = watchdogFixture({
-    readPhase: () => phase,
+    readPhase: () => "terminal",
     requestStop: () => "resumed",
     expireCleanup,
   });
-  phase = "terminal";
   watchdog.beginTerminal();
   expect(await tickAt(watchdog, SESSION_WATCHDOG_CLEANUP_MS)).toEqual({
     action: "observe",
@@ -418,12 +417,10 @@ it("counts async tool completion only while its exact attempt is current", async
 
 it("retains finishing custody after failed cleanup until the raw writer actually settles", async () => {
   const operation = begin();
-  const cancel = attach(
-    operation,
-    vi.fn(() => {
-      throw new Error("writer still live");
-    }),
-  );
+  const cancel = vi.fn(() => {
+    throw new Error("writer still live");
+  });
+  attach(operation, cancel);
   operation.freezeAbort();
   const releaseWork = beginReplyOperationFinalizationWork(
     operation,
@@ -458,13 +455,7 @@ it("retains committed delivery settlement after cleanup expiry", async () => {
   expect(operation.result).toEqual({ kind: "completed" });
   const rawSettled = vi.fn();
   void operation.ownerSettlement.then(rawSettled);
-  const createSuccessor = () =>
-    createReplyOperation({
-      sessionKey: key,
-      sessionId,
-      resetTriggered: false,
-      turnKind: "queued_followup",
-    });
+  const createSuccessor = () => createReplyOperation({ ...session, turnKind: "queued_followup" });
   await tickAt(operation.watchdog, SESSION_WATCHDOG_CLEANUP_MS + 1);
   expect(operation.result).toEqual({ kind: "completed" });
   expect(rawSettled).not.toHaveBeenCalled();
@@ -522,7 +513,7 @@ it.each(["backend-throw", "cleanup-throw", "attempt-close"] as const)(
 );
 
 it("keeps the rekeyed after-clear watchdog live until its actual completion barrier", async () => {
-  const operation = createReplyOperation({ sessionKey: key, sessionId, resetTriggered: false });
+  const operation = createReplyOperation(session);
   operation.updateSessionKey(key + ":adopted");
   const writer = createDeferredCore();
   operation.completeWithAfterClearBarrier(writer.promise, 1);
