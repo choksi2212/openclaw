@@ -224,13 +224,19 @@ export abstract class ChatPaneContext extends ChatPaneLifecycle {
     for (const { key, agentId } of stateValue.deletedSessions) {
       clearChatMessagesFromCache(state.chatMessagesBySession, state, { sessionKey: key, agentId });
     }
+    // Live rows retire on disconnect; the session owner retains same-identity
+    // presentation (including deferred metadata) until the next canonical list.
+    const presentation =
+      this.context.gateway.snapshot.phase === "connected"
+        ? stateValue
+        : this.context.sessions.presentation;
     // A list for another agent must not overwrite this pane's global history.
     if (
       !isUiSelectedGlobalSessionKey(state, state.sessionKey) ||
-      stateValue.agentId === resolveChatAgentId(state)
+      presentation.agentId === resolveChatAgentId(state)
     ) {
-      state.sessionsResult = stateValue.result;
-      state.sessionsResultAgentId = stateValue.agentId;
+      state.sessionsResult = presentation.result;
+      state.sessionsResultAgentId = presentation.agentId;
     }
     this.projectObservedSessionRow();
     state.sessionsLoading = stateValue.loading;
