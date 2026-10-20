@@ -419,7 +419,7 @@ export function inspectOtherOpenClawProcesses(references?: HandoffReferences | s
           result.unverifiedPids.push(pid);
           const image = observation?.executable ?? argv?.[0];
           warnings.push(
-            `Could not verify handoff ancestry for PID ${pid} (${image ? (windows ? path.win32 : path).basename(image) : "image unavailable"}); continuing without descendant evidence.`,
+            `Could not verify handoff ancestry for PID ${pid} (${image ? (windows ? path.win32 : path).basename(image) : "image unavailable"}).`,
           );
         }
         continue;

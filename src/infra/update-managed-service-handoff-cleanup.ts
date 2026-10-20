@@ -5,7 +5,6 @@ import path from "node:path";
 import { safeParseJson } from "@openclaw/normalization-core/json-coercion";
 import { positiveSecondsToSafeMilliseconds } from "@openclaw/normalization-core/number-coercion";
 import { isRecord, isStringArray } from "@openclaw/normalization-core/record-coerce";
-import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { ManagedHandoffRepairFacts } from "./update-managed-service-handoff-database.js";
 import type { ManagedHandoffLease } from "./update-managed-service-handoff-lease-types.js";
 
@@ -13,7 +12,6 @@ type DiscoveredRepairFacts = ManagedHandoffRepairFacts & {
   windowsUserSid?: string;
   drivers?: ManagedHandoffLease["helper"][];
 };
-const log = createSubsystemLogger("update");
 
 /** v1 shipped in 2026.8.2. This proves cleanup eligibility, never v2 authority. */
 export function canCleanupLegacyManagedHandoff(
@@ -104,13 +102,10 @@ export async function inspectManagedHandoffRepairFacts(
       drivers: [previous.helper, previous.executor, ...(discovered.drivers ?? [])],
       familyExited,
     });
-    for (const warning of [...(census.warnings ?? []), ...(census.error ? [census.error] : [])]) {
-      log.warn(warning);
-    }
-    const pids = census.matchingPids;
-    if (pids.length) {
+    const pids = [...new Set([...census.matchingPids, ...census.unverifiedPids])];
+    if (pids.length || census.error) {
       throw new Error(
-        `Handoff descendants or OpenClaw runtime holders remain alive: PID ${pids.join(", ")}. Stop the named work through its owning terminal or service, then run openclaw update repair.`,
+        `Handoff descendants remain alive or unverified${pids.length ? `: PID ${pids.join(", ")}` : ""}. ${census.error || "Stop the named work through its owning terminal or service, verify process-inspection permissions, then run openclaw update repair."}`,
       );
     }
   }

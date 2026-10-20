@@ -103,23 +103,22 @@ it.each([
   }
 });
 
-it.each([false, true])(
-  "settles warning-only process uncertainty (incomplete census: %s)",
-  async (incomplete) => {
-    fixture.seed();
-    fixture.processCensus.unverifiedPids.push(81234);
-    fixture.processCensus.warnings = [
-      "Could not verify handoff ancestry for PID 81234 (DefenderSessionHelper.exe); continuing without descendant evidence.",
-    ];
-    if (incomplete) {
+it.each(["unverified intermediate-parent descendant", "incomplete census"])(
+  "blocks settlement and the next update for an %s",
+  async (reason) => {
+    const previous = fixture.seed();
+    if (reason === "incomplete census") {
       fixture.processCensus.error = "Host process census is incomplete.";
+    } else {
+      // The census cannot trace a surviving worker through an exited parent.
+      fixture.processCensus.unverifiedPids.push(81234);
     }
-    using repair = await prepareRepair();
-    const run = newRun();
-    repair.bindRun(run.runId);
-    repair.complete(run.runId);
-    expect(settlement(run.runId)?.status).toBe("completed");
-    expect(nextUpdate()).toBe("acquired");
+    await expect(prepareRepair()).rejects.toThrow(
+      reason === "incomplete census" ? /census is incomplete/ : /unverified: PID 81234/,
+    );
+    expect(fixture.current()).toEqual(previous);
+    expect(nextUpdate()).toBe("busy");
+    expect(ledger.listUpdateRuns({}, { env })).toEqual([]);
     expect(fs.readFileSync(fixture.diagnosticPath, "utf8")).toBe("Retained update diagnostics\n");
   },
 );
