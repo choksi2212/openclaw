@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import type {
+  ClawDraftReviewChoices,
   ClawsDraftsPublishResult,
   ClawsDraftsReviewResult,
 } from "../../packages/gateway-protocol/src/index.js";
@@ -12,7 +13,7 @@ import {
 import { clawDraftRevision, prepareClawDraft } from "./draft.js";
 import { ClawProjectError } from "./project.js";
 
-type DraftTarget = { workspaceDir: string; draftId: string };
+type DraftTarget = { workspaceDir: string; draftId: string; choices?: ClawDraftReviewChoices };
 
 async function personalPublisher(options: ClawHubFetchOptions) {
   const token = options.token ?? (await resolveClawHubAuthToken());
@@ -68,6 +69,8 @@ export async function reviewClawDraft(
     publisher,
     name: snapshot.name,
     version: snapshot.version,
+    description: snapshot.description,
+    items: snapshot.items,
     files: snapshot.files,
     scope: snapshot.scope,
   };

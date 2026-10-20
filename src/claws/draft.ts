@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { tempWorkspace } from "@openclaw/fs-safe/temp";
 import {
   type ClawDraftDocument,
+  type ClawDraftReviewChoices,
   validateClawDraftDocument,
 } from "../../packages/gateway-protocol/src/index.js";
 import { root as fsSafeRoot } from "../infra/fs-safe.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 import { redactSensitiveText } from "../logging/redact.js";
+import { applyClawDraftChoices } from "./draft-choices.js";
 import { buildClawProject, extractBuiltClawArtifact } from "./project-build.js";
 import { ClawProjectError } from "./project.js";
 import {
@@ -37,6 +39,7 @@ export async function createClawDraft(workspaceDir: string, assertCurrent?: () =
   const relativePath = clawDraftRelativePath(draftId);
   const document: ClawDraftDocument = {
     name: "my-claw",
+    description: "",
     version: "0.1.0",
     scope: { input: "", job: "", output: "", authority: "" },
     manifest: "---\nschemaVersion: 1\nagent:\n  id: my-claw\n---\n",
@@ -119,6 +122,7 @@ export async function prepareClawDraft(params: {
   workspaceDir: string;
   draftId: string;
   publisher: string;
+  choices?: ClawDraftReviewChoices;
 }) {
   if (!/^[a-z0-9][a-z0-9._-]*$/.test(params.publisher)) {
     throw new ClawProjectError(
@@ -127,7 +131,8 @@ export async function prepareClawDraft(params: {
     );
   }
   const draft = await readClawDraft(params.workspaceDir, params.draftId);
-  const proposal = parseProposal(draft.content);
+  const selected = applyClawDraftChoices(parseProposal(draft.content), params.choices);
+  const proposal = selected.proposal;
   const name = `@${params.publisher}/${proposal.name}`;
   const manifest = `${proposal.manifest.trimEnd()}\n\n## Portable workflow\n\n${Object.entries(
     proposal.scope,
@@ -185,6 +190,8 @@ export async function prepareClawDraft(params: {
       name,
       version: proposal.version,
       scope: proposal.scope,
+      description: selected.description,
+      items: selected.items,
       revision: draft.revision,
       integrity: built.integrity,
       artifact: built.artifact,

@@ -16,6 +16,7 @@ export const ClawDraftScopeSchema = closedObject({
 });
 export const ClawDraftDocumentSchema = closedObject({
   name: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" }),
+  description: Type.Optional(Text),
   version: Type.String({ minLength: 1, maxLength: 128 }),
   scope: ClawDraftScopeSchema,
   manifest: Type.String({ maxLength: 256_000 }),
@@ -37,8 +38,20 @@ export const ClawsDraftsSaveParamsSchema = closedObject({
   content: Type.String({ maxLength: 1_000_000 }),
   expectedRevision: Revision,
 });
-export const ClawsDraftsReviewParamsSchema = closedObject(Target);
-export const ClawsDraftsPublishParamsSchema = closedObject({ ...Target, reviewToken: Revision });
+const ReviewChoices = closedObject({
+  name: Type.String({ pattern: "^[a-z][a-z0-9_-]{0,63}$" }),
+  description: Text,
+  excluded: Type.Array(Type.String({ minLength: 1, maxLength: 640 }), { maxItems: 128 }),
+});
+export const ClawsDraftsReviewParamsSchema = closedObject({
+  ...Target,
+  choices: Type.Optional(ReviewChoices),
+});
+export const ClawsDraftsPublishParamsSchema = closedObject({
+  ...Target,
+  reviewToken: Revision,
+  choices: Type.Optional(ReviewChoices),
+});
 
 export type ClawDraftDocument = Static<typeof ClawDraftDocumentSchema>;
 export type ClawsDraftsCreateParams = Static<typeof ClawsDraftsCreateParamsSchema>;
@@ -46,6 +59,14 @@ export type ClawsDraftsReadParams = Static<typeof ClawsDraftsReadParamsSchema>;
 export type ClawsDraftsSaveParams = Static<typeof ClawsDraftsSaveParamsSchema>;
 export type ClawsDraftsReviewParams = Static<typeof ClawsDraftsReviewParamsSchema>;
 export type ClawsDraftsPublishParams = Static<typeof ClawsDraftsPublishParamsSchema>;
+export type ClawDraftReviewChoices = Static<typeof ReviewChoices>;
+export type ClawDraftReviewItem = {
+  id: string;
+  kind: "file" | "skill" | "plugin" | "mcp" | "automation";
+  label: string;
+  detail: string;
+  included: boolean;
+};
 export type ClawsDraftsReadResult = { content: string; revision: string };
 export type ClawsDraftsCreateResult = { draftId: string; path: string; prompt: string };
 export type ClawsDraftsReviewResult = {
@@ -54,6 +75,8 @@ export type ClawsDraftsReviewResult = {
   publisher: string;
   name: string;
   version: string;
+  description: string;
+  items: ClawDraftReviewItem[];
   files: Array<{ path: string; content: string }>;
   scope: ClawDraftDocument["scope"];
 };

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { stringify } from "yaml";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { publishClawDraft, reviewClawDraft } from "./draft-publish.js";
 import { createClawDraft, prepareClawDraft } from "./draft.js";
@@ -85,6 +86,92 @@ describe("agent-created Claw drafts", () => {
       code: "sensitive_draft_content",
       message: expect.not.stringContaining(secret),
     });
+  });
+
+  it("removes unchecked files and dependencies from the exact archive and binds the review token to the choices", async () => {
+    const workspaceDir = tempDirs.make("claw-draft-selections-");
+    const draft = await createClawDraft(workspaceDir);
+    const manifest = {
+      schemaVersion: 1,
+      agent: { id: "research-brief", description: "Original agent description" },
+      workspace: {
+        bootstrapFiles: { "AGENTS.md": { source: "workspace/AGENTS.md" } },
+        files: [{ source: "workspace/checklist.md", path: "checklist.md" }],
+      },
+      packages: [
+        { kind: "skill", source: "clawhub", ref: "@maker/sources", version: "1.2.3" },
+        { kind: "plugin", source: "clawhub", ref: "@maker/github", version: "2.0.0" },
+      ],
+      mcpServers: { research: { command: "research-mcp" } },
+      cronJobs: [
+        {
+          id: "weekly-recap",
+          schedule: { cron: "0 9 * * 1", timezone: "UTC" },
+          session: "isolated",
+          message: "Recap research.",
+        },
+      ],
+    };
+    await writeFile(
+      draft.path,
+      JSON.stringify({
+        ...proposal,
+        manifest: `---\n${stringify(manifest)}---\nResearch public sources.\n`,
+        files: [
+          { path: "workspace/AGENTS.md", content: "Keep citations." },
+          { path: "workspace/checklist.md", content: "Check dates." },
+        ],
+      }),
+    );
+    const choices = {
+      name: "public-researcher",
+      description: "Researches public sources for a new user.",
+      excluded: [
+        "file:workspace/checklist.md",
+        "package:skill:@maker/sources",
+        "package:plugin:@maker/github",
+        "mcp:research",
+        "cron:weekly-recap",
+      ],
+    };
+    await using selected = await prepareClawDraft({
+      workspaceDir,
+      draftId: draft.draftId,
+      publisher: "maker",
+      choices,
+    });
+    expect(selected.files.map((file) => file.path)).toEqual([
+      "CLAW.md",
+      "package.json",
+      "workspace/AGENTS.md",
+    ]);
+    expect(selected.items.filter((item) => item.included).map((item) => item.id)).toEqual([
+      "file:workspace/AGENTS.md",
+    ]);
+    const claw = selected.files.find((file) => file.path === "CLAW.md")!.content;
+    expect(claw).toContain("description: Researches public sources for a new user.");
+    expect(claw).not.toMatch(/checklist|@maker\/sources|@maker\/github|research-mcp|weekly-recap/);
+
+    let posts = 0;
+    const options = {
+      token: "fixture-personal-token",
+      fetchImpl: async (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts += 1;
+        }
+        return Response.json({ user: { handle: "maker" } });
+      },
+    };
+    const target = { workspaceDir, draftId: draft.draftId };
+    const review = await reviewClawDraft({ ...target, choices }, options);
+    await expect(
+      publishClawDraft(
+        { ...target, choices: { ...choices, excluded: [] }, reviewToken: review.reviewToken },
+        () => {},
+        options,
+      ),
+    ).rejects.toMatchObject({ code: "draft_review_required" });
+    expect(posts).toBe(0);
   });
 
   it("rejects a draft file replaced by a symlink to source material", async () => {

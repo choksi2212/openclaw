@@ -123,7 +123,7 @@ export const clawsDraftsHandlers: GatewayRequestHandlers = {
         assertCurrent();
         options.respond(true, {
           ...draft,
-          prompt: clawDraftPrompt(draft.draftId, params.sourceSessionKey),
+          prompt: clawDraftPrompt(draft.draftId),
         });
       } finally {
         source?.authorization?.release?.();
@@ -186,6 +186,7 @@ export const clawsDraftsHandlers: GatewayRequestHandlers = {
       const review = await reviewClawDraft({
         workspaceDir: authority.workspaceDir,
         draftId: params.draftId,
+        choices: params.choices,
       });
       authority.assertCurrent();
       options.respond(true, review);
@@ -203,6 +204,7 @@ export const clawsDraftsHandlers: GatewayRequestHandlers = {
           workspaceDir: authority.workspaceDir,
           draftId: params.draftId,
           reviewToken: params.reviewToken,
+          choices: params.choices,
         },
         authority.assertCurrent,
       );
