@@ -18,6 +18,8 @@ const job = (conclusion = "success", steps = [makeStep()], name = releaseName) =
   steps,
 });
 const successfulJob = job();
+const failedJob = job("failure", [makeStep("failure")]);
+type Outcome = [conclusion: string | null, detail: string, jobs?: ReturnType<typeof job>[]];
 const webhookPath = "/api/webhooks/123/synthetic-webhook-token?wait=true";
 type Reply = {
   body?: unknown;
@@ -177,12 +179,8 @@ describe("scheduled mobile store release notifications", () => {
       ["schedule", "Android Internal testing distribution", false],
       ["workflow_dispatch", "iOS Store release (weekly)", false],
     ] as const) {
-      expect(
-        expression(notify.if, {
-          ...github,
-          event: { workflow_run: { ...github.event.workflow_run, event, display_title } },
-        }),
-      ).toBe(expected);
+      Object.assign(github.event.workflow_run, { event, display_title });
+      expect(expression(notify.if, github)).toBe(expected);
       if (expected) {
         expect(expression(notify.environment, { event: { workflow_run: { display_title } } })).toBe(
           display_title.startsWith("iOS") ? "ios-store-release" : "android-store-release",
@@ -265,61 +263,44 @@ describe("scheduled mobile store release notifications", () => {
     expect(result.posts[0]?.body?.content).toContain("/attempts/2)");
   });
 
-  it.each([
-    ...[
-      ["failure", "The workflow failed during Prepare and upload iOS release."],
-      ["timed_out", "The run exceeded its time limit during Prepare and upload iOS release."],
-      ["cancelled", "The run was cancelled during Prepare and upload iOS release."],
-      ["startup_failure", "GitHub could not start the workflow."],
-      ["action_required", "GitHub reported that action is required. Check the run."],
-      ["neutral", "The run finished without a confirmed successful release."],
-      ["skipped", "The workflow was skipped."],
-      ["stale", "GitHub marked the run stale."],
-      [null, "The release outcome could not be confirmed. Check the run."],
-      ["unrecognized", "The release outcome could not be confirmed. Check the run."],
-    ].map(([conclusion, reason]) => ({
-      conclusion,
-      jobs: [job("failure", [makeStep("failure")])],
-      detail: `${reason} Store acceptance is unconfirmed.`,
-    })),
-    {
-      conclusion: "success",
-      jobs: [job("skipped", [])],
-      detail: "The store release job was skipped. Upload was not started.",
-    },
-    ...[[], [job("success", [])]].map((jobs) => ({
-      conclusion: "success",
+  it.each<Outcome>([
+    ["failure", "The workflow failed during Prepare and upload iOS release."],
+    ["timed_out", "The run exceeded its time limit during Prepare and upload iOS release."],
+    ["cancelled", "The run was cancelled during Prepare and upload iOS release."],
+    ["startup_failure", "GitHub could not start the workflow."],
+    ["action_required", "GitHub reported that action is required. Check the run."],
+    ["neutral", "The run finished without a confirmed successful release."],
+    ["skipped", "The workflow was skipped."],
+    ["stale", "GitHub marked the run stale."],
+    [null, "The release outcome could not be confirmed. Check the run."],
+    ["unrecognized", "The release outcome could not be confirmed. Check the run."],
+    ["success", "The store release job was skipped. Upload was not started.", [job("skipped", [])]],
+    ...[[], [job("success", [])]].map((jobs): Outcome => [
+      "success",
+      "The release outcome could not be confirmed. Check the run. Store acceptance is unconfirmed.",
       jobs,
-      detail:
-        "The release outcome could not be confirmed. Check the run. Store acceptance is unconfirmed.",
-    })),
-    {
-      conclusion: "failure",
-      jobs: [
+    ]),
+    [
+      "failure",
+      "The workflow failed during Run qualification. The store release job was skipped; upload was not started.",
+      [
         job("failure", [makeStep("failure", "Run qualification")], "qualify / iPad"),
         job("skipped", []),
       ],
-      detail:
-        "The workflow failed during Run qualification. The store release job was skipped; upload was not started.",
-    },
-    ...["skipped", "success"].map((upload) => ({
-      conclusion: "failure",
-      jobs: [
-        job("failure", [
-          makeStep(
-            "failure",
-            upload === "skipped" ? "Setup Ruby" : "Retain release plan and notes",
-          ),
-          makeStep(upload),
-        ]),
-      ],
-      detail:
-        upload === "skipped"
-          ? "The workflow failed during Setup Ruby. Upload was not started."
-          : "Build uploaded. The workflow failed during Retain release plan and notes.",
-    })),
-  ])("reports unconfirmed release evidence: $detail", ({ conclusion, jobs, detail }) => {
-    const result = evaluate({ run: { conclusion }, jobs });
+    ],
+    [
+      "failure",
+      "The workflow failed during Setup Ruby. Upload was not started.",
+      [job("failure", [makeStep("failure", "Setup Ruby"), makeStep("skipped")])],
+    ],
+    [
+      "failure",
+      "Build uploaded. The workflow failed during Retain release plan and notes.",
+      [job("failure", [makeStep("failure", "Retain release plan and notes"), makeStep()])],
+    ],
+  ])("reports %s release evidence: %s", (conclusion, reason, jobs) => {
+    const detail = jobs ? reason : `${reason} Store acceptance is unconfirmed.`;
+    const result = evaluate({ run: { conclusion }, jobs: jobs ?? [failedJob] });
     expect(result.status, result.output).toBe(0);
     expect(result.posts[0]?.body).toMatchObject({
       content: expect.stringContaining(`⚠️ **iOS release needs attention**\n${detail}`),
@@ -327,7 +308,7 @@ describe("scheduled mobile store release notifications", () => {
     });
   });
 
-  it("still reports an unconfirmed result when metadata lookup exhausts retries", () => {
+  it("reports an unconfirmed result after exhausted metadata retries", () => {
     const result = evaluate({
       responses: { [jobsPath]: { status: 503, body: { secret: webhook } } },
     });
@@ -339,7 +320,7 @@ describe("scheduled mobile store release notifications", () => {
     expect(result.output).not.toContain(webhook);
   });
 
-  it("retries network errors and honors Discord rate limiting without rerunning a release", () => {
+  it("retries transport errors and rate limits without rerunning releases", () => {
     const result = evaluate({
       responses: {
         [webhookPath]: [

@@ -45,7 +45,7 @@ describe("build-web-ui-chat-evidence", () => {
     const incomplete = captureAttempt(root, "incomplete", false);
     const complete = captureAttempt(root, "complete");
     writeFileSync(path.join(root, "vitest.log"), "current invocation log");
-    const result = build(
+    const { loaded: manifest, report } = build(
       root,
       "pass",
       "--candidate-ref",
@@ -53,7 +53,6 @@ describe("build-web-ui-chat-evidence", () => {
       "--candidate-sha",
       "1234567890abcdef1234567890abcdef12345678",
     );
-    const manifest = result.loaded;
     expect(manifest).toMatchObject({
       id: "web-ui-chat-proof",
       scenario: "web-ui-chat-proof",
@@ -87,19 +86,18 @@ describe("build-web-ui-chat-evidence", () => {
         expect(artifact?.targetPath).toBe(`${relative}/${file}`);
         expect(read(artifact!.source)).toBe(`${marker} ${content}`);
         expect(comment).toContain(`https://artifacts.example.test/current/${relative}/${file}`);
-        expect(result.report).toContain(`${relative}/${file}`);
+        expect(report).toContain(`${relative}/${file}`);
       }
     }
     expect(read(prior.reportPath)).toBe(prior.report);
     expect(read(prior.manifestPath)).toBe(priorManifest);
     expect(read(path.join(priorCapture, "web-ui-chat.png"))).toBe("prior screenshot");
-    expect(result.report).not.toContain(path.basename(priorCapture));
+    expect(report).not.toContain(path.basename(priorCapture));
   });
 
   it("retains setup failures before a capture exists as publishable failure evidence", () => {
     writeFileSync(path.join(dir, "setup.log"), "candidate installation failed");
-    const result = build(dir, "fail");
-    const manifest = result.loaded;
+    const { loaded: manifest, report } = build(dir, "fail");
     expect(manifest.comparison).toMatchObject({
       candidate: { expectationMet: false, status: "fail" },
       pass: false,
@@ -110,7 +108,7 @@ describe("build-web-ui-chat-evidence", () => {
       "mantis-evidence.json",
     ]);
     expect(manifest.summary).toContain("could not complete");
-    expect(result.report).toContain("`setup.log` (present)");
+    expect(report).toContain("`setup.log` (present)");
   });
 
   it("keeps a failed process verdict even when an attempt completed its captures", () => {

@@ -88,6 +88,78 @@ function ownedKeychain(runnerTemp: string, filename = "signing.keychain", conten
   return { root, file };
 }
 
+function keychainFixture(workspace: string, suffix: string, partial = false) {
+  const runnerTemp = tempRoots.make(`openclaw-ios-keychain-${partial ? "partial-" : ""}`);
+  const environmentFile = path.join(runnerTemp, "environment");
+  const stateFile = path.join(runnerTemp, "state");
+  const env = signingEnv(workspace, runnerTemp, {
+    GITHUB_ENV: environmentFile,
+    GITHUB_STATE: stateFile,
+  });
+  let actionOutput = "";
+  let expectedDeletion: string | undefined;
+  const commands: string[][] = [];
+  const argument = (args: string[], prefix: string) =>
+    expectDefined(args.find((value) => value.startsWith(prefix))?.slice(prefix.length), prefix);
+  const runCommand = async (
+    executable: string,
+    args: string[],
+    options: { env?: NodeJS.ProcessEnv },
+  ) => {
+    commands.push(args);
+    expect(executable).toBe("bundle");
+    if (args.includes("create_keychain")) {
+      const requestedPath = argument(args, "path:");
+      expect(readText(stateFile)).toContain(`requested_path=${requestedPath}\n`);
+      expect(options.env?.KEYCHAIN_PASSWORD).toMatch(/^[a-f0-9]{64}$/u);
+      expect(args.join("\n")).not.toContain(options.env?.KEYCHAIN_PASSWORD);
+      fs.writeFileSync(`${requestedPath}${suffix}`, `${partial ? "partial" : "owned"} keychain\n`);
+      if (partial) {
+        throw new Error("partial create");
+      }
+    } else if (args.includes("delete_keychain")) {
+      const file = argument(args, "keychain_path:");
+      if (expectedDeletion !== undefined) {
+        expect(file).toBe(expectedDeletion);
+      }
+      fs.unlinkSync(file);
+    } else {
+      throw new Error(`Unexpected Fastlane action: ${args.join(" ")}`);
+    }
+    return { stderr: "", stdout: "" };
+  };
+  return {
+    environmentFile,
+    commands,
+    output: () => actionOutput,
+    state: () => readOutputs(stateFile),
+    create: () =>
+      createOwnedKeychain({
+        env,
+        runCommand,
+        output: {
+          write(value: string) {
+            actionOutput += value;
+            return true;
+          },
+        },
+      }),
+    cleanup: (expectedPath?: string) => {
+      expectedDeletion = expectedPath;
+      const state = readOutputs(stateFile);
+      return cleanupOwnedKeychain({
+        runCommand,
+        env: {
+          ...env,
+          STATE_owned_root: state.owned_root,
+          STATE_requested_path: state.requested_path,
+          ...(partial ? {} : { STATE_resolved_path: state.resolved_path }),
+        },
+      });
+    },
+  };
+}
+
 function expectFilesExist(expected: boolean, ...files: string[]): void {
   expect(files.map((file) => [file, fs.existsSync(file)])).toEqual(
     files.map((file) => [file, expected]),
@@ -1512,76 +1584,24 @@ describe("mobile release CI tools", () => {
     const workspace = tempRoots.make("openclaw-ios-keychain-workspace-");
     fs.mkdirSync(path.join(workspace, "apps/ios"), { recursive: true });
     for (const filenameSuffix of ["", "-db"] as const) {
-      const runnerTemp = tempRoots.make(
-        `openclaw-ios-keychain-${filenameSuffix ? "database" : "requested"}-`,
-      );
-      const environmentFile = path.join(runnerTemp, "environment");
-      const stateFile = path.join(runnerTemp, "state");
-      const env = signingEnv(workspace, runnerTemp, {
-        GITHUB_ENV: environmentFile,
-        GITHUB_STATE: stateFile,
-      });
-      let actionOutput = "";
-      const output = {
-        write(value: string) {
-          actionOutput += value;
-          return true;
-        },
-      };
-      const commands: Array<{ args: string[]; executable: string }> = [];
-      const runCommand = async (
-        executable: string,
-        args: string[],
-        options: { env?: NodeJS.ProcessEnv },
-      ) => {
-        commands.push({ args, executable });
-        expect(executable).toBe("bundle");
-        if (args.includes("create_keychain")) {
-          const requestedPath = args.find((argument) => argument.startsWith("path:"))?.slice(5);
-          if (!requestedPath) {
-            throw new Error("Missing create_keychain path");
-          }
-          expect(readText(stateFile)).toContain(`requested_path=${requestedPath}\n`);
-          const password = options.env?.KEYCHAIN_PASSWORD;
-          expect(password).toMatch(/^[a-f0-9]{64}$/u);
-          expect(args.join("\n")).not.toContain(password);
-          fs.writeFileSync(`${requestedPath}${filenameSuffix}`, "owned keychain\n");
-        } else if (args.includes("delete_keychain")) {
-          const keychainPath = args
-            .find((argument) => argument.startsWith("keychain_path:"))
-            ?.slice("keychain_path:".length);
-          if (!keychainPath) {
-            throw new Error("Missing delete_keychain path");
-          }
-          fs.unlinkSync(keychainPath);
-        } else {
-          throw new Error(`Unexpected Fastlane action: ${args.join(" ")}`);
-        }
-        return { stderr: "", stdout: "" };
-      };
-
-      const created = await createOwnedKeychain({ env, output, runCommand });
+      const fixture = keychainFixture(workspace, filenameSuffix);
+      const created = await fixture.create();
       expect(created.resolvedPath).toBe(`${created.requestedPath}${filenameSuffix}`);
       expect(fs.statSync(created.ownedRoot).mode & 0o777).toBe(0o700);
-      expect(actionOutput).toBe(`::add-mask::${created.password}\n`);
-      expect(readText(environmentFile)).toBe(
+      expect(fixture.output()).toBe(`::add-mask::${created.password}\n`);
+      expect(readText(fixture.environmentFile)).toBe(
         `MATCH_KEYCHAIN_NAME=${created.resolvedPath}\n` +
           `MATCH_KEYCHAIN_PASSWORD=${created.password}\n`,
       );
-      const state = readOutputs(stateFile);
+      const state = fixture.state();
       expect(state.resolved_path).toBe(created.resolvedPath);
-      await cleanupOwnedKeychain({
-        env: {
-          ...env,
-          STATE_owned_root: state.owned_root,
-          STATE_requested_path: state.requested_path,
-          STATE_resolved_path: state.resolved_path,
-        },
-        runCommand,
-      });
+      await fixture.cleanup();
       expect(fs.existsSync(created.ownedRoot)).toBe(false);
-      expect(commands.map(({ args }) => args[4])).toEqual(["create_keychain", "delete_keychain"]);
-      expect(commands.at(-1)?.args).toContain(`keychain_path:${created.resolvedPath}`);
+      expect(fixture.commands.map((args) => args[4])).toEqual([
+        "create_keychain",
+        "delete_keychain",
+      ]);
+      expect(fixture.commands.at(-1)).toContain(`keychain_path:${created.resolvedPath}`);
     }
 
     const source = readText(".github/actions/ios-signing-keychain/keychain.mjs");
@@ -1603,50 +1623,13 @@ describe("mobile release CI tools", () => {
     const workspace = tempRoots.make("openclaw-ios-keychain-partial-workspace-");
     fs.mkdirSync(path.join(workspace, "apps/ios"), { recursive: true });
     for (const filenameSuffix of ["", "-db"] as const) {
-      const runnerTemp = tempRoots.make(
-        `openclaw-ios-keychain-partial-${filenameSuffix ? "database" : "requested"}-`,
-      );
-      const environmentFile = path.join(runnerTemp, "environment");
-      const stateFile = path.join(runnerTemp, "state");
-      const env = signingEnv(workspace, runnerTemp, {
-        GITHUB_ENV: environmentFile,
-        GITHUB_STATE: stateFile,
-      });
-      const createCommand = async (_command: string, args: string[]) => {
-        const requestedPath = args.find((argument) => argument.startsWith("path:"))?.slice(5);
-        if (!requestedPath) {
-          throw new Error("Missing partial create path");
-        }
-        fs.writeFileSync(`${requestedPath}${filenameSuffix}`, "partial keychain\n");
-        throw new Error("partial create");
-      };
-
-      await expect(
-        createOwnedKeychain({
-          env,
-          output: { write: () => true },
-          runCommand: createCommand,
-        }),
-      ).rejects.toThrow("partial create");
-      expect(fs.existsSync(environmentFile)).toBe(false);
-      const state = readOutputs(stateFile);
+      const fixture = keychainFixture(workspace, filenameSuffix, true);
+      await expect(fixture.create()).rejects.toThrow("partial create");
+      expect(fs.existsSync(fixture.environmentFile)).toBe(false);
+      const state = fixture.state();
       const partialPath = `${state.requested_path}${filenameSuffix}`;
       expect(fs.existsSync(partialPath)).toBe(true);
-      await cleanupOwnedKeychain({
-        env: {
-          ...env,
-          STATE_owned_root: state.owned_root,
-          STATE_requested_path: state.requested_path,
-        },
-        runCommand: async (_command: string, args: string[]) => {
-          const keychainPath = args
-            .find((argument) => argument.startsWith("keychain_path:"))
-            ?.slice("keychain_path:".length);
-          expect(keychainPath).toBe(partialPath);
-          fs.unlinkSync(partialPath);
-          return { stderr: "", stdout: "" };
-        },
-      });
+      await fixture.cleanup(partialPath);
       expect(fs.existsSync(expectDefined(state.owned_root, "owned keychain root"))).toBe(false);
     }
 

@@ -20,14 +20,8 @@ function fixture(variant: (typeof variants)[number]) {
   const output = path.join(root, "github-output");
   const receipt = path.join(root, "npm-receipt.json");
   const bin = path.join(root, "bin");
-  fs.mkdirSync(source);
   fs.mkdirSync(bin);
-  for (const name of ["package.json", "package-lock.json"]) {
-    fs.copyFileSync(
-      path.join(".github/release", `${variant.name}-cli`, name),
-      path.join(source, name),
-    );
-  }
+  fs.cpSync(path.join(".github/release", `${variant.name}-cli`), source, { recursive: true });
   fs.symlinkSync(process.execPath, path.join(bin, "node"));
   fs.writeFileSync(
     path.join(bin, "npm"),
@@ -94,10 +88,7 @@ describe("pinned release CLI materialization", () => {
           .readFileSync(test.output, "utf8")
           .trim()
           .split("\n")
-          .map((line) => {
-            const separator = line.indexOf("=");
-            return [line.slice(0, separator), line.slice(separator + 1)];
-          }),
+          .map((line) => line.split(/[=](.*)/s, 2)),
       );
       expect(output).toEqual({
         cli: path.join(test.destination, "node_modules/.bin", variant.name),
