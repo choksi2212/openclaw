@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stringify } from "yaml";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { publishClawDraft, reviewClawDraft } from "./draft-publish.js";
@@ -9,6 +9,7 @@ import { createClawDraft, prepareClawDraft } from "./draft.js";
 import { extractBuiltClawArtifact } from "./project-build.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+afterEach(() => vi.unstubAllGlobals());
 const proposal = {
   name: "research-brief",
   version: "0.1.0",
@@ -155,13 +156,13 @@ describe("agent-created Claw drafts", () => {
     let posts = 0;
     const options = {
       token: "fixture-personal-token",
-      fetchImpl: async (_input: string | URL | Request, init?: RequestInit) => {
-        if (init?.method === "POST") {
-          posts += 1;
-        }
-        return Response.json({ user: { handle: "maker" } });
-      },
     };
+    vi.stubGlobal("fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts += 1;
+      }
+      return Response.json({ user: { handle: "maker" } });
+    });
     const target = { workspaceDir, draftId: draft.draftId };
     const review = await reviewClawDraft({ ...target, choices }, options);
     await expect(
@@ -195,36 +196,36 @@ describe("agent-created Claw drafts", () => {
     const options = {
       baseUrl: "https://registry.example.test",
       token: "fixture-personal-token",
-      fetchImpl: async (input: string | URL | Request, init?: RequestInit) => {
-        const request = new Request(input, init);
-        expect(request.headers.get("Authorization")).toBe("Bearer fixture-personal-token");
-        if (request.url.endsWith("/whoami")) {
-          return Response.json({ user: { handle: "maker" } });
-        }
-        expect(request.method).toBe("POST");
-        const form = await request.formData();
-        const payload = form.get("payload");
-        const archive = form.get("clawpack");
-        if (typeof payload !== "string" || !(archive instanceof File)) {
-          throw new Error("Expected the real ClawHub multipart publication contract");
-        }
-        const bytes = Buffer.from(await archive.arrayBuffer());
-        const metadata: Record<string, unknown> = JSON.parse(payload);
-        expect(metadata).toMatchObject({
-          name: "@maker/research-brief",
-          family: "claw",
-          channel: "community",
-          ownerHandle: "maker",
-          expectedArtifactSha256: createHash("sha256").update(bytes).digest("hex"),
-        });
-        uploads.push({ metadata, bytes });
-        return Response.json({
-          ok: true,
-          artifactSha256: metadata.expectedArtifactSha256,
-          publicationStatus: "pending",
-        });
-      },
     };
+    vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      const request = new Request(input, init);
+      expect(request.headers.get("Authorization")).toBe("Bearer fixture-personal-token");
+      if (request.url.endsWith("/whoami")) {
+        return Response.json({ user: { handle: "maker" } });
+      }
+      expect(request.method).toBe("POST");
+      const form = await request.formData();
+      const payload = form.get("payload");
+      const archive = form.get("clawpack");
+      if (typeof payload !== "string" || !(archive instanceof File)) {
+        throw new Error("Expected the real ClawHub multipart publication contract");
+      }
+      const bytes = Buffer.from(await archive.arrayBuffer());
+      const metadata: Record<string, unknown> = JSON.parse(payload);
+      expect(metadata).toMatchObject({
+        name: "@maker/research-brief",
+        family: "claw",
+        channel: "community",
+        ownerHandle: "maker",
+        expectedArtifactSha256: createHash("sha256").update(bytes).digest("hex"),
+      });
+      uploads.push({ metadata, bytes });
+      return Response.json({
+        ok: true,
+        artifactSha256: metadata.expectedArtifactSha256,
+        publicationStatus: "pending",
+      });
+    });
     const review = await reviewClawDraft(target, options);
     expect(uploads).toHaveLength(0);
     const result = await publishClawDraft(
@@ -255,16 +256,16 @@ describe("agent-created Claw drafts", () => {
       let posts = 0;
       const options = {
         token: "fixture-personal-token",
-        fetchImpl: async (_input: string | URL | Request, init?: RequestInit) => {
-          if (init?.method === "POST") {
-            posts += 1;
-          }
-          if (revokeOnIdentity) {
-            current = false;
-          }
-          return Response.json({ user: { handle: publisher } });
-        },
       };
+      vi.stubGlobal("fetch", async (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          posts += 1;
+        }
+        if (revokeOnIdentity) {
+          current = false;
+        }
+        return Response.json({ user: { handle: publisher } });
+      });
       const review = await reviewClawDraft(target, options);
       if (change === "draft") {
         await writeFile(
