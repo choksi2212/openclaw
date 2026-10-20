@@ -25,6 +25,7 @@ import type { SessionEntrySummary } from "../config/sessions/session-accessor.js
 import type { SessionAcpMeta, SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { resolveStoredSessionKeyForAgentStore } from "../gateway/session-store-key.js";
+import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { classifySessionKind } from "../sessions/classify-session-kind.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
@@ -122,6 +123,10 @@ function resolveConfiguredStatusModelRef(params: {
       ...params,
       allowManifestNormalization: false,
       allowPluginNormalization: false,
+      // Status must not discover provider metadata; the current snapshot keeps declared
+      // providers authoritative without a manifest scan on every status read.
+      manifestPlugins:
+        getCurrentPluginMetadataSnapshot({ config: params.cfg, env: process.env }) ?? [],
     },
     // Include ACP agent primaries rather than substituting their native fallback.
     "acp",

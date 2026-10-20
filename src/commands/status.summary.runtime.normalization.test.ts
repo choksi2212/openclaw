@@ -4,6 +4,15 @@ import type { OpenClawConfig } from "../config/types.js";
 
 const resolveManifestModelIdNormalizationPoliciesMock = vi.hoisted(() => vi.fn());
 const normalizeProviderModelIdWithRuntimeMock = vi.hoisted(() => vi.fn());
+const loadManifestMetadataSnapshotMock = vi.hoisted(() => vi.fn());
+
+// Status alias resolution must reuse current metadata, never scan plugin manifests.
+vi.mock("../plugins/manifest-contract-eligibility.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../plugins/manifest-contract-eligibility.js")>();
+  loadManifestMetadataSnapshotMock.mockImplementation(actual.loadManifestMetadataSnapshot);
+  return { ...actual, loadManifestMetadataSnapshot: loadManifestMetadataSnapshotMock };
+});
 
 vi.mock("../plugins/manifest-model-id-normalization.js", () => ({
   resolveManifestModelIdNormalizationPolicies: resolveManifestModelIdNormalizationPoliciesMock,
@@ -18,6 +27,7 @@ describe("statusSummaryRuntime configured model normalization", () => {
     vi.resetModules();
     resolveManifestModelIdNormalizationPoliciesMock.mockReset();
     normalizeProviderModelIdWithRuntimeMock.mockReset();
+    loadManifestMetadataSnapshotMock.mockClear();
   });
 
   it("skips manifest and plugin model normalization for configured model refs", async () => {
@@ -79,6 +89,33 @@ describe("statusSummaryRuntime configured model normalization", () => {
     expect(resolved).toEqual({ provider: "anthropic", model: "fixture-local" });
     expect(resolveManifestModelIdNormalizationPoliciesMock).not.toHaveBeenCalled();
     expect(normalizeProviderModelIdWithRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it("resolves a cross-provider qualified alias without scanning a Gateway workspace", async () => {
+    const [{ statusSummaryRuntime }, runtime, { createEmptyPluginRegistry }] = await Promise.all([
+      import("../status/summary.runtime.js"),
+      import("../plugins/runtime.js"),
+      import("../plugins/registry-empty.js"),
+    ]);
+    runtime.setActivePluginRegistry(createEmptyPluginRegistry(), undefined, "default", "/tmp");
+    try {
+      // A provider-shaped alias for another provider consults declared providers.
+      statusSummaryRuntime.resolveConfiguredStatusModelRef({
+        cfg: {
+          agents: {
+            defaults: {
+              model: "anthropic/fixture-local",
+              models: { "openai/fixture-other": { alias: "anthropic/fixture-local" } },
+            },
+          },
+        },
+        defaultProvider: "openai",
+        defaultModel: "fixture-fallback",
+      });
+      expect(loadManifestMetadataSnapshotMock).not.toHaveBeenCalled();
+    } finally {
+      runtime.resetPluginRuntimeStateForTest();
+    }
   });
 
   it("resolves agent-local aliases without model normalization", async () => {
