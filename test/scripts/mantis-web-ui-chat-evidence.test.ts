@@ -14,6 +14,7 @@ beforeEach(() => {
   dir = tempDirs.make("openclaw-mantis-web-ui-chat-");
 });
 const read = (file: string) => readFileSync(file, "utf8");
+const metadata = '{"status":"pass"}';
 function build(root: string, status: "pass" | "fail", ...args: string[]) {
   const result = writeWebUiChatEvidence(["--output-dir", root, "--status", status, ...args]);
   return {
@@ -28,10 +29,7 @@ function captureAttempt(parent: string, marker: string, complete = true): string
   writeFileSync(path.join(directory, "web-ui-chat.png"), `${marker} screenshot`);
   writeFileSync(path.join(directory, "web-ui-chat.webm"), `${marker} video`);
   if (complete) {
-    writeFileSync(
-      path.join(directory, "web-ui-chat-proof.json"),
-      JSON.stringify({ status: "pass" }),
-    );
+    writeFileSync(path.join(directory, "web-ui-chat-proof.json"), metadata);
   }
   return directory;
 }
@@ -125,7 +123,6 @@ describe("build-web-ui-chat-evidence", () => {
   it.each(["absent", "old flat files", "split attempts"])(
     "rejects a passing verdict with %s instead of using unrelated proof",
     (kind) => {
-      const metadata = JSON.stringify({ status: "pass" });
       if (kind === "old flat files") {
         writeFileSync(path.join(dir, "web-ui-chat.png"), "old screenshot");
         writeFileSync(path.join(dir, "web-ui-chat-proof.json"), metadata);

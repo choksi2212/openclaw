@@ -1,23 +1,13 @@
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
+import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
-type WorkflowStep = {
-  id?: string;
-  if?: string;
-  env?: Record<string, string>;
-  name?: string;
-  run?: string;
-  uses?: string;
-  with?: Record<string, string>;
-};
-
-type WorkflowJob = {
-  outputs?: Record<string, string>;
-  permissions?: Record<string, string>;
+type WorkflowStep = Partial<Record<"id" | "if" | "name" | "run", string>> &
+  Partial<Record<"env" | "with", Record<string, string>>>;
+type WorkflowJob = Partial<Record<"outputs" | "permissions" | "with", Record<string, string>>> & {
   steps?: WorkflowStep[];
-  with?: Record<string, string>;
 };
 
 function readWorkflow(file: string) {
@@ -26,11 +16,10 @@ function readWorkflow(file: string) {
   };
 }
 function workflowJob(name: string): WorkflowJob {
-  const job = readWorkflow("mantis-web-ui-chat-proof").jobs?.[name];
-  if (!job) {
-    throw new Error(`Missing ${name} job`);
-  }
-  return job;
+  return expectDefined(
+    readWorkflow("mantis-web-ui-chat-proof").jobs?.[name],
+    `Missing ${name} job`,
+  );
 }
 function containsAll(actual: string | undefined, expected: string[]) {
   for (const text of expected) {
@@ -39,17 +28,17 @@ function containsAll(actual: string | undefined, expected: string[]) {
 }
 
 async function resolveCandidateRef(body: string, pullRequestHead: string) {
-  const request = workflowJob("resolve_request").with;
-  if (!request) {
-    throw new Error("Missing shared resolver inputs");
-  }
+  const request = expectDefined(
+    workflowJob("resolve_request").with,
+    "Missing shared resolver inputs",
+  );
   const outputs = new Map<string, string>();
-  const script = readWorkflow("mantis-resolve-request").jobs?.resolve?.steps?.find(
-    (step) => step.name === "Resolve refs and target PR",
-  )?.with?.script;
-  if (!script) {
-    throw new Error("Missing shared Resolve refs and target PR script");
-  }
+  const script = expectDefined(
+    readWorkflow("mantis-resolve-request").jobs?.resolve?.steps?.find(
+      (step) => step.name === "Resolve refs and target PR",
+    )?.with?.script,
+    "Missing shared Resolve refs and target PR script",
+  );
   await runInNewContext(`(async () => {\n${script}\n})()`, {
     context: {
       eventName: "issue_comment",

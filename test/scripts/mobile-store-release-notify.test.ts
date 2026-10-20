@@ -129,10 +129,6 @@ globalThis.fetch = async (url, options = {}) => {
   };
 }
 
-function expectContent(result: ReturnType<typeof evaluate>, content: string) {
-  expect(result.posts[0]?.body?.content).toContain(content);
-}
-
 function expression(value: string, github: Record<string, unknown>) {
   return runInNewContext(value.replace(/^\$\{\{\s*|\s*\}\}$/gu, ""), { github });
 }
@@ -209,25 +205,22 @@ describe("scheduled mobile store release notifications", () => {
   it.each([
     ["iOS", "Build uploaded and prepared in App Store Connect."],
     ["Android", "Google Play upload completed."],
-  ] as const)(
-    "reports a proven %s store release without mentions or embeds",
-    (platform, detail) => {
-      const result = evaluate({ platform });
-      expect(result.status, result.output).toBe(0);
-      expect(result.posts).toHaveLength(1);
-      expect(result.posts[0]).toMatchObject({
-        url: `${webhook}?wait=true`,
-        redirect: "error",
-        abortable: true,
-        body: {
-          content: `✅ **${platform} release uploaded successfully**\n${detail}\n[**View run ↗**](https://github.com/openclaw/openclaw/actions/runs/123/attempts/1)`,
-          flags: 4,
-          allowed_mentions: { parse: [] },
-        },
-      });
-      expect(result.requests.every((request) => request.abortable)).toBe(true);
-    },
-  );
+  ] as const)("reports a proven %s upload", (platform, detail) => {
+    const result = evaluate({ platform });
+    expect(result.status, result.output).toBe(0);
+    expect(result.posts).toHaveLength(1);
+    expect(result.posts[0]).toMatchObject({
+      url: `${webhook}?wait=true`,
+      redirect: "error",
+      abortable: true,
+      body: {
+        content: `✅ **${platform} release uploaded successfully**\n${detail}\n[**View run ↗**](https://github.com/openclaw/openclaw/actions/runs/123/attempts/1)`,
+        flags: 4,
+        allowed_mentions: { parse: [] },
+      },
+    });
+    expect(result.requests.every((request) => request.abortable)).toBe(true);
+  });
 
   it.each([
     { event: "workflow_dispatch" },
@@ -266,97 +259,73 @@ describe("scheduled mobile store release notifications", () => {
       `https://api.github.com${path}`,
       `https://api.github.com${path.replace("&page=1", "&page=2")}`,
     ]);
-    expectContent(result, "✅ **iOS release uploaded successfully · Attempt 2**");
-    expectContent(result, "/attempts/2)");
+    expect(result.posts[0]?.body?.content).toContain(
+      "✅ **iOS release uploaded successfully · Attempt 2**",
+    );
+    expect(result.posts[0]?.body?.content).toContain("/attempts/2)");
   });
 
   it.each([
-    ["failure", "The workflow failed during Prepare and upload iOS release."],
-    ["timed_out", "The run exceeded its time limit during Prepare and upload iOS release."],
-    ["cancelled", "The run was cancelled during Prepare and upload iOS release."],
-    ["startup_failure", "GitHub could not start the workflow."],
-    ["action_required", "GitHub reported that action is required. Check the run."],
-    ["neutral", "The run finished without a confirmed successful release."],
-    ["skipped", "The workflow was skipped."],
-    ["stale", "GitHub marked the run stale."],
-    [null, "The release outcome could not be confirmed. Check the run."],
-    ["unrecognized", "The release outcome could not be confirmed. Check the run."],
-  ])(
-    "reports %s conservatively when the aggregate upload step did not succeed",
-    (conclusion, reason) => {
-      const result = evaluate({
-        run: { conclusion },
-        jobs: [job("failure", [makeStep("failure")])],
-      });
-      expect(result.status, result.output).toBe(0);
-      expectContent(
-        result,
-        `⚠️ **iOS release needs attention**\n${reason} Store acceptance is unconfirmed.`,
-      );
-      expect(result.posts[0]?.body?.flags).toBe(4);
-    },
-  );
-
-  it.each([
+    ...[
+      ["failure", "The workflow failed during Prepare and upload iOS release."],
+      ["timed_out", "The run exceeded its time limit during Prepare and upload iOS release."],
+      ["cancelled", "The run was cancelled during Prepare and upload iOS release."],
+      ["startup_failure", "GitHub could not start the workflow."],
+      ["action_required", "GitHub reported that action is required. Check the run."],
+      ["neutral", "The run finished without a confirmed successful release."],
+      ["skipped", "The workflow was skipped."],
+      ["stale", "GitHub marked the run stale."],
+      [null, "The release outcome could not be confirmed. Check the run."],
+      ["unrecognized", "The release outcome could not be confirmed. Check the run."],
+    ].map(([conclusion, reason]) => ({
+      conclusion,
+      jobs: [job("failure", [makeStep("failure")])],
+      detail: `${reason} Store acceptance is unconfirmed.`,
+    })),
     {
+      conclusion: "success",
       jobs: [job("skipped", [])],
       detail: "The store release job was skipped. Upload was not started.",
     },
-    {
-      jobs: [],
+    ...[[], [job("success", [])]].map((jobs) => ({
+      conclusion: "success",
+      jobs,
       detail:
         "The release outcome could not be confirmed. Check the run. Store acceptance is unconfirmed.",
-    },
+    })),
     {
-      jobs: [job("success", [])],
-      detail:
-        "The release outcome could not be confirmed. Check the run. Store acceptance is unconfirmed.",
-    },
-  ])(
-    "does not mistake a successful workflow conclusion for a completed upload: $detail",
-    ({ jobs, detail }) => {
-      const result = evaluate({ jobs });
-      expectContent(result, `⚠️ **iOS release needs attention**\n${detail}`);
-    },
-  );
-
-  it("distinguishes a qualification failure from an attempted upload", () => {
-    const result = evaluate({
-      run: { conclusion: "failure" },
+      conclusion: "failure",
       jobs: [
         job("failure", [makeStep("failure", "Run qualification")], "qualify / iPad"),
         job("skipped", []),
       ],
-    });
-    expectContent(
-      result,
-      "The workflow failed during Run qualification. The store release job was skipped; upload was not started.",
-    );
-  });
-
-  it.each(["skipped", "success"])(
-    "preserves evidence of a %s upload when another step fails",
-    (upload) => {
-      const result = evaluate({
-        run: { conclusion: "failure" },
-        jobs: [
-          job("failure", [
-            makeStep(
-              "failure",
-              upload === "skipped" ? "Setup Ruby" : "Retain release plan and notes",
-            ),
-            makeStep(upload),
-          ]),
-        ],
-      });
-      expectContent(
-        result,
+      detail:
+        "The workflow failed during Run qualification. The store release job was skipped; upload was not started.",
+    },
+    ...["skipped", "success"].map((upload) => ({
+      conclusion: "failure",
+      jobs: [
+        job("failure", [
+          makeStep(
+            "failure",
+            upload === "skipped" ? "Setup Ruby" : "Retain release plan and notes",
+          ),
+          makeStep(upload),
+        ]),
+      ],
+      detail:
         upload === "skipped"
           ? "The workflow failed during Setup Ruby. Upload was not started."
           : "Build uploaded. The workflow failed during Retain release plan and notes.",
-      );
-    },
-  );
+    })),
+  ])("reports unconfirmed release evidence: $detail", ({ conclusion, jobs, detail }) => {
+    const result = evaluate({ run: { conclusion }, jobs });
+    expect(result.status, result.output).toBe(0);
+    expect(result.posts[0]?.body).toMatchObject({
+      content: expect.stringContaining(`⚠️ **iOS release needs attention**\n${detail}`),
+      flags: 4,
+    });
+  });
 
   it("still reports an unconfirmed result when metadata lookup exhausts retries", () => {
     const result = evaluate({
@@ -364,8 +333,7 @@ describe("scheduled mobile store release notifications", () => {
     });
     expect(result.status, result.output).toBe(0);
     expect(result.waits).toEqual([1_000, 2_000]);
-    expectContent(
-      result,
+    expect(result.posts[0]?.body?.content).toContain(
       "⚠️ **iOS release needs attention**\nRelease job details could not be retrieved.",
     );
     expect(result.output).not.toContain(webhook);
@@ -406,7 +374,7 @@ describe("scheduled mobile store release notifications", () => {
   });
 
   it.each(["", "https://example.com/api/webhooks/123/private-token"])(
-    "requires a configured Discord webhook before making requests",
+    "rejects bad webhooks",
     (value) => {
       const result = evaluate({ webhook: value });
       expect(result).toMatchObject({ status: 1, requests: [] });

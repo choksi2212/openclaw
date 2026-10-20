@@ -69,6 +69,31 @@ function writeFile(root: string, file: string, source: string): void {
   fs.writeFileSync(destination, source);
 }
 
+function writeExecutable(root: string, file: string, source: string, mode = 0o755): string {
+  const destination = path.join(root, file);
+  fs.writeFileSync(destination, source, { mode });
+  return destination;
+}
+
+function signingEnv(workspace: string, runnerTemp: string, extra: NodeJS.ProcessEnv = {}) {
+  return { ...process.env, GITHUB_WORKSPACE: workspace, RUNNER_TEMP: runnerTemp, ...extra };
+}
+
+function ownedKeychain(runnerTemp: string, filename = "signing.keychain", contents?: string) {
+  const root = fs.mkdtempSync(path.join(runnerTemp, "openclaw-ios-signing-keychain-"));
+  const file = path.join(root, filename);
+  if (contents !== undefined) {
+    fs.writeFileSync(file, contents);
+  }
+  return { root, file };
+}
+
+function expectFilesExist(expected: boolean, ...files: string[]): void {
+  expect(files.map((file) => [file, fs.existsSync(file)])).toEqual(
+    files.map((file) => [file, expected]),
+  );
+}
+
 function commit(repository: string, message: string): string {
   git(repository, "add", "-A");
   git(repository, "commit", "-m", message);
@@ -103,6 +128,11 @@ function stepIndex(steps: WorkflowStep[], name: string): number {
   return steps.findIndex((step) => step.name === name);
 }
 
+function expectStepPrefix(steps: WorkflowStep[], names: string[]): WorkflowStep[] {
+  expect(steps.slice(0, names.length).map((step) => step.name)).toEqual(names);
+  return steps;
+}
+
 function releaseSteps(file: string): WorkflowStep[] {
   const workflow = parse(readText(file)) as { jobs: { release: { steps: WorkflowStep[] } } };
   return workflow.jobs.release.steps;
@@ -110,6 +140,50 @@ function releaseSteps(file: string): WorkflowStep[] {
 
 function shell(...lines: string[]): string {
   return ["#!/bin/bash", "set -euo pipefail", ...lines, ""].join("\n");
+}
+
+function adbFixture(
+  options: {
+    serial?: string;
+    avd?: string;
+    boot?: string;
+    properties?: string;
+    logcat?: string;
+    shellFirst?: boolean;
+    onlyDevices?: boolean;
+  } = {},
+): string {
+  const serial = options.serial ?? "emulator-5554";
+  const devices = serial ? `${serial}\\tdevice product:sdk model:sdk\\n` : "\\n";
+  const emu = [
+    '"${1:-}" == "-s" && "${3:-}" == "emu"',
+    options.avd ? `printf '${options.avd}\\nOK\\n'` : "printf '%s\\nOK\\n' \"${AVD_NAME:?}\"",
+  ];
+  const properties = [
+    '"${1:-}" == "-s" && "${3:-}" == "shell"',
+    options.properties ?? "printf '1\\n'",
+  ];
+  const branches = options.onlyDevices
+    ? []
+    : [
+        ...(options.shellFirst ? [properties, emu] : [emu]),
+        ...(options.boot
+          ? [
+              [
+                '"${1:-}" == "-s" && "${3:-}" == "shell" && "${5:-}" == "sys.boot_completed"',
+                options.boot,
+              ],
+            ]
+          : []),
+        ...(options.shellFirst ? [] : [properties]),
+        ...(options.logcat ? [['"${1:-}" == "-s" && "${3:-}" == "logcat"', options.logcat]] : []),
+      ];
+  return shell(
+    'if [[ "${1:-}" == "devices" ]]; then',
+    `  printf 'List of devices attached\\n${devices}'`,
+    ...branches.flatMap(([condition, body]) => [`elif [[ ${condition} ]]; then`, `  ${body}`]),
+    "fi",
+  );
 }
 
 function evaluateWorkflowExpression(expression: string, context: Record<string, unknown>): unknown {
@@ -346,21 +420,26 @@ describe("mobile release CI tools", () => {
     const validationSteps = validationJob.steps;
     const job = workflow.jobs.diagnose;
     const steps = job.steps;
-    const validateIndex = stepIndex(validationSteps, "Validate target SHA");
-    const validationTrustedCheckoutIndex = stepIndex(
+    const [validate, validationTrustedCheckout, checkout, head, parity] = expectStepPrefix(
       validationSteps,
-      "Checkout trusted Android tooling",
+      [
+        "Validate target SHA",
+        "Checkout trusted Android tooling",
+        "Checkout exact target",
+        "Verify exact target checkout",
+        "Verify Android toolchain action parity",
+      ],
     );
-    const checkoutIndex = stepIndex(validationSteps, "Checkout exact target");
-    const headIndex = stepIndex(validationSteps, "Verify exact target checkout");
-    const parityIndex = stepIndex(validationSteps, "Verify Android toolchain action parity");
-    const initializeIndex = stepIndex(steps, "Initialize Android emulator diagnostic");
-    const trustedCheckoutIndex = stepIndex(steps, "Checkout trusted Android tooling");
-    const setupIndex = stepIndex(steps, "Setup Android toolchain");
-    const toolingIndex = stepIndex(steps, "Prepare trusted Linux Android tooling");
-    const kvmIndex = stepIndex(steps, "Collect Linux KVM acceleration proof");
-    const diagnosticIndex = stepIndex(steps, "Run phone emulator diagnostic");
-    const artifactIndex = stepIndex(steps, "Upload Android emulator diagnostic");
+    const [initialize, trustedCheckout, setup, toolingStep, kvm, diagnosticStep, artifact] =
+      expectStepPrefix(steps, [
+        "Initialize Android emulator diagnostic",
+        "Checkout trusted Android tooling",
+        "Setup Android toolchain",
+        "Prepare trusted Linux Android tooling",
+        "Collect Linux KVM acceleration proof",
+        "Run phone emulator diagnostic",
+        "Upload Android emulator diagnostic",
+      ]);
 
     expect(workflow.name).toBe("Android Emulator Diagnostic");
     expect(workflow["run-name"]).toBe(
@@ -388,29 +467,15 @@ describe("mobile release CI tools", () => {
       SYSTEM_IMAGE: "system-images;android-36;google_apis;x86_64",
     });
 
-    expect(validateIndex).toBe(0);
-    expect(validationTrustedCheckoutIndex).toBe(validateIndex + 1);
-    expect(checkoutIndex).toBe(validationTrustedCheckoutIndex + 1);
-    expect(headIndex).toBe(checkoutIndex + 1);
-    expect(parityIndex).toBe(headIndex + 1);
-    expect(initializeIndex).toBe(0);
-    expect(trustedCheckoutIndex).toBe(initializeIndex + 1);
-    expect(setupIndex).toBe(trustedCheckoutIndex + 1);
-    expect(toolingIndex).toBe(setupIndex + 1);
-    expect(kvmIndex).toBe(toolingIndex + 1);
-    expect(diagnosticIndex).toBe(kvmIndex + 1);
-    expect(artifactIndex).toBe(diagnosticIndex + 1);
-    expect(validationSteps[validateIndex]?.env).toEqual({
+    expect(validate?.env).toEqual({
       TARGET_SHA: "${{ inputs.target_sha }}",
     });
-    expect(validationSteps[validateIndex]?.run).toContain(
-      '[[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]',
-    );
-    expect(steps[initializeIndex]?.env).toEqual({
+    expect(validate?.run).toContain('[[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]');
+    expect(initialize?.env).toEqual({
       TARGET_SHA: "${{ inputs.target_sha }}",
     });
     expectContains(
-      steps[initializeIndex]?.run,
+      initialize?.run,
       'DIAGNOSTIC_DIR="$RUNNER_TEMP/android-emulator-diagnostic"',
       'echo "DIAGNOSTIC_DIR=$DIAGNOSTIC_DIR" >>"$GITHUB_ENV"',
       "printf 'host_cpu=%s\\n' \"$(awk -F: '/^model name/",
@@ -418,7 +483,7 @@ describe("mobile release CI tools", () => {
       "printf 'host_memory_bytes=%s\\n' \"$(awk '/^MemTotal:/",
       "cat /etc/os-release",
     );
-    expect(validationSteps[validationTrustedCheckoutIndex]).toMatchObject({
+    expect(validationTrustedCheckout).toMatchObject({
       uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       with: {
         ref: "${{ github.workflow_sha }}",
@@ -428,7 +493,7 @@ describe("mobile release CI tools", () => {
         path: ".mobile-release-tooling",
       },
     });
-    expect(validationSteps[checkoutIndex]).toMatchObject({
+    expect(checkout).toMatchObject({
       uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       with: {
         ref: "${{ inputs.target_sha }}",
@@ -437,13 +502,11 @@ describe("mobile release CI tools", () => {
         path: "candidate",
       },
     });
-    expect(validationSteps[headIndex]?.env).toEqual({
+    expect(head?.env).toEqual({
       TARGET_SHA: "${{ inputs.target_sha }}",
     });
-    expect(validationSteps[headIndex]?.run).toContain(
-      'test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"',
-    );
-    expect(steps[trustedCheckoutIndex]).toMatchObject({
+    expect(head?.run).toContain('test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"');
+    expect(trustedCheckout).toMatchObject({
       uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       with: {
         ref: "${{ github.workflow_sha }}",
@@ -454,7 +517,7 @@ describe("mobile release CI tools", () => {
         path: ".mobile-release-tooling",
       },
     });
-    expect(steps[setupIndex]).toMatchObject({
+    expect(setup).toMatchObject({
       uses: "./.mobile-release-tooling/.github/actions/setup-android-toolchain",
       with: {
         "cache-mode": "off",
@@ -463,7 +526,7 @@ describe("mobile release CI tools", () => {
     });
     expect(JSON.stringify(steps)).not.toContain("candidate/");
 
-    const tooling = steps[toolingIndex]?.run ?? "";
+    const tooling = toolingStep?.run ?? "";
     expectContains(
       tooling,
       'test "$(git -C "$trusted_root" rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"',
@@ -494,11 +557,7 @@ describe("mobile release CI tools", () => {
       const rule = path.join(root, "kvm.rules");
       const udevTrace = path.join(root, "udev.trace");
       fs.mkdirSync(bin);
-      const executable = (name: string, contents: string) => {
-        const executablePath = path.join(bin, name);
-        fs.writeFileSync(executablePath, contents, { mode: 0o755 });
-        return executablePath;
-      };
+      const executable = (name: string, contents: string) => writeExecutable(bin, name, contents);
       const timeout = executable(
         "timeout",
         shell(
@@ -553,8 +612,8 @@ describe("mobile release CI tools", () => {
     ]);
     const kvmDiagnosticDir = path.join(usableKvm.root, "diagnostic");
     fs.mkdirSync(kvmDiagnosticDir);
-    expect(steps[kvmIndex]?.if).toBe("always()");
-    command("/bin/bash", ["-c", steps[kvmIndex]?.run ?? ""], {
+    expect(kvm?.if).toBe("always()");
+    command("/bin/bash", ["-c", kvm?.run ?? ""], {
       env: { ...process.env, RUNNER_TEMP: usableKvm.root, DIAGNOSTIC_DIR: kvmDiagnosticDir },
     });
     expect(readText(kvmDiagnosticDir, "emulator-kvm-check.txt")).toBe(usableKvm.output);
@@ -576,7 +635,7 @@ describe("mobile release CI tools", () => {
     expectContains(timedOutKvm.output, "exit_status=124", "timed_out=true");
     expect(fs.existsSync(timedOutKvm.sentinel)).toBe(false);
 
-    const parityScript = validationSteps[parityIndex]?.run ?? "";
+    const parityScript = parity?.run ?? "";
 
     const actionPath = ".github/actions/setup-android-toolchain/action.yml";
     const trustedAction = "name: fixture\nruns:\n  using: composite\n  steps: []\n";
@@ -630,7 +689,7 @@ describe("mobile release CI tools", () => {
       expect(fs.existsSync(rejected.sentinel)).toBe(false);
     }
 
-    const diagnostic = steps[diagnosticIndex]?.run ?? "";
+    const diagnostic = diagnosticStep?.run ?? "";
     expectContains(
       diagnostic,
       'printf \'no\\n\' | avdmanager create avd --force --name "$AVD_NAME" --package "$SYSTEM_IMAGE" --device "$DEVICE_PROFILE"',
@@ -657,7 +716,7 @@ describe("mobile release CI tools", () => {
       const diagnosticDir = path.join(root, "diagnostic");
       fs.mkdirSync(bin);
       fs.mkdirSync(diagnosticDir);
-      fs.writeFileSync(path.join(bin, "emulator"), emulatorSource, { mode: 0o755 });
+      writeExecutable(bin, "emulator", emulatorSource);
       const result = bash(
         `set -euo pipefail\n${accelFunction}\ncapture_accel_check\n`,
         {
@@ -723,7 +782,7 @@ describe("mobile release CI tools", () => {
       const preObservationDelaySeconds = options.preObservationDelaySeconds ?? 0;
       fs.mkdirSync(bin);
       fs.mkdirSync(diagnosticDir);
-      fs.writeFileSync(path.join(bin, "adb"), adbSource, { mode: 0o755 });
+      writeExecutable(bin, "adb", adbSource);
       const startedAt = Date.now();
       const result = await runVitestShutdownCommand({
         bin: "/bin/bash",
@@ -785,19 +844,9 @@ describe("mobile release CI tools", () => {
       "final_snapshot_lead_seconds=4",
       "final_snapshot_lead_seconds=60",
     );
-    const lateReady = await runPostDeadlineObservation(
-      `#!/bin/bash
-set -euo pipefail
-if [[ "\${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\\nemulator-5554\\tdevice product:sdk model:sdk\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "shell" ]]; then
-  printf '1\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "emu" ]]; then
-  printf '%s\\nOK\\n' "\${AVD_NAME:?}"
-fi
-`,
-      { functions: lateReadyNearCeilingFunctions },
-    );
+    const lateReady = await runPostDeadlineObservation(adbFixture({ shellFirst: true }), {
+      functions: lateReadyNearCeilingFunctions,
+    });
     expect(lateReady.result.status).toBe(1);
     expect(lateReady.result.stderr).toContain("::error::latched readiness failure");
     expectContains(
@@ -813,36 +862,20 @@ fi
 
     const [failedBootProbeResult, boundedSnapshotsResult] = await Promise.allSettled([
       runPostDeadlineObservation(
-        `#!/bin/bash
-set -euo pipefail
-if [[ "\${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\\nemulator-5554\\tdevice product:sdk model:sdk\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "emu" ]]; then
-  printf '%s\\nOK\\n' "\${AVD_NAME:?}"
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "shell" && "\${5:-}" == "sys.boot_completed" ]]; then
-  exit 7
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "shell" ]]; then
-  printf '[init.svc.example]: [running]\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "logcat" ]]; then
-  printf 'system crash evidence line\\n'
-fi
-`,
+        adbFixture({
+          boot: "exit 7",
+          properties: "printf '[init.svc.example]: [running]\\n'",
+          logcat: "printf 'system crash evidence line\\n'",
+        }),
         { functions: lateReadyNearCeilingFunctions },
       ),
-      runPostDeadlineObservation(`#!/bin/bash
-set -euo pipefail
-if [[ "\${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\\nemulator-5554\\tdevice product:sdk model:sdk\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "emu" ]]; then
-  printf '%s\\nOK\\n' "\${AVD_NAME:?}"
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "shell" && "\${5:-}" == "sys.boot_completed" ]]; then
-  printf '\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "shell" ]]; then
-  for _ in {1..40}; do printf '[init.svc.example]: [running]\\n'; done
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "logcat" ]]; then
-  for _ in {1..40}; do printf 'system crash evidence line\\n'; done
-fi
-`),
+      runPostDeadlineObservation(
+        adbFixture({
+          boot: "printf '\\n'",
+          properties: "for _ in {1..40}; do printf '[init.svc.example]: [running]\\n'; done",
+          logcat: "for _ in {1..40}; do printf 'system crash evidence line\\n'; done",
+        }),
+      ),
     ]);
     if (
       failedBootProbeResult.status === "rejected" &&
@@ -866,16 +899,7 @@ fi
     expect(failedBootProbeNearCeiling.observations).toContain("boot_status=7");
     expect(failedBootProbeNearCeiling.snapshots).toEqual(["first-online", "near-ceiling"]);
 
-    const unrelatedDevice = await runPostDeadlineObservation(`#!/bin/bash
-set -euo pipefail
-if [[ "\${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\\nemulator-5554\\tdevice product:sdk model:sdk\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "emu" ]]; then
-  printf 'Another_AVD\\nOK\\n'
-elif [[ "\${1:-}" == "-s" && "\${3:-}" == "shell" ]]; then
-  printf '1\\n'
-fi
-`);
+    const unrelatedDevice = await runPostDeadlineObservation(adbFixture({ avd: "Another_AVD" }));
     expect(unrelatedDevice.result.status).toBe(1);
     expect(unrelatedDevice.observations).toContain("observation_stop=unexpected-avd");
     expect(unrelatedDevice.observations).not.toContain("late_adb_online_at=");
@@ -883,12 +907,7 @@ fi
     expect(unrelatedDevice.snapshots).toEqual([]);
 
     const changedDevice = await runPostDeadlineObservation(
-      `#!/bin/bash
-set -euo pipefail
-if [[ "\${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\\nemulator-5556\\tdevice product:sdk model:sdk\\n'
-fi
-`,
+      adbFixture({ serial: "emulator-5556", onlyDevices: true }),
       { initialSerial: "emulator-5554" },
     );
     expect(changedDevice.result.status).toBe(1);
@@ -896,12 +915,7 @@ fi
     expect(changedDevice.snapshots).toEqual([]);
 
     const absoluteCap = await runPostDeadlineObservation(
-      `#!/bin/bash
-set -euo pipefail
-if [[ "\${1:-}" == "devices" ]]; then
-  printf 'List of devices attached\\n\\n'
-fi
-`,
+      adbFixture({ serial: "", onlyDevices: true }),
       { deadlineSeconds: 3, preObservationDelaySeconds: 2 },
     );
     expect(absoluteCap.result.status).toBe(1);
@@ -986,17 +1000,17 @@ fi
     const emulatorPidFile = path.join(hangingRoot, "emulator.pid");
     fs.mkdirSync(hangingBin);
     fs.mkdirSync(hangingDiagnosticDir);
-    fs.writeFileSync(
-      path.join(hangingBin, "adb"),
+    writeExecutable(
+      hangingBin,
+      "adb",
       '#!/bin/bash\nset -euo pipefail\nprintf \'%s\\n\' "$$" >"$ADB_PID_FILE"\nexec sleep 30\n',
-      { mode: 0o755 },
     );
-    fs.writeFileSync(
-      path.join(hangingBin, "avdmanager"),
+    writeExecutable(
+      hangingBin,
+      "avdmanager",
       "#!/bin/bash\nset -euo pipefail\nprintf 'cleanup\\n' >>\"$CLEANUP_TRACE\"\n",
-      { mode: 0o755 },
     );
-    fs.writeFileSync(path.join(hangingBin, "ps"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+    writeExecutable(hangingBin, "ps", "#!/bin/bash\nexit 0\n");
     const hangingResult = bash(
       [
         "set -euo pipefail",
@@ -1055,7 +1069,7 @@ fi
     expect(diagnostic).toMatch(
       /fail_after_readiness_timeout \\\n\s+"Timed out waiting for Android emulator boot completion" "\$serial"/u,
     );
-    expect(steps[artifactIndex]).toMatchObject({
+    expect(artifact).toMatchObject({
       if: "always()",
       uses: "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
       with: {
@@ -1155,12 +1169,8 @@ fi
         fs.symlinkSync(path.join(root, "missing-sourceparts"), aptSourceParts);
       }
 
-      const writeExecutable = (name: string, source: string): string => {
-        const executable = path.join(bin, name);
-        fs.writeFileSync(executable, source, { mode: 0o755 });
-        return executable;
-      };
-      const timeout = writeExecutable(
+      const executable = (name: string, source: string) => writeExecutable(bin, name, source);
+      const timeout = executable(
         "timeout",
         shell(
           "while (( $# > 0 )); do",
@@ -1173,7 +1183,7 @@ fi
           'exec "$@"',
         ),
       );
-      const sudo = writeExecutable(
+      const sudo = executable(
         "sudo",
         shell(
           'test "$1" = "env"',
@@ -1182,7 +1192,7 @@ fi
           'exec "$@"',
         ),
       );
-      const aptGet = writeExecutable(
+      const aptGet = executable(
         "apt-get",
         shell(
           'printf "%s\\n" "$*" >>"$APT_LOG"',
@@ -1198,17 +1208,14 @@ fi
           'printf "install\\n" >"$INSTALL_SENTINEL"',
         ),
       );
-      const convert = writeExecutable(
-        "convert",
-        shell('output="${!#}"', 'printf "png\\n" >"$output"'),
-      );
-      const identify = writeExecutable(
+      const convert = executable("convert", shell('output="${!#}"', 'printf "png\\n" >"$output"'));
+      const identify = executable(
         "identify",
         shell(
           "printf 'format=JPEG width=1 height=1 colorspace=sRGB type=TrueColor channels=3.0 quality=95\\n'",
         ),
       );
-      writeExecutable(
+      executable(
         "git",
         shell(
           'test "$1" = "-C"',
@@ -1228,7 +1235,7 @@ fi
         writeFile(trustedRoot, "scripts/android-sips-linux.sh", adapterSource);
         fs.chmodSync(path.join(trustedRoot, "scripts/android-sips-linux.sh"), 0o755);
       }
-      fs.writeFileSync(path.join(root, "adapter-source.sh"), adapterSource, { mode: 0o755 });
+      writeExecutable(root, "adapter-source.sh", adapterSource);
 
       let body = readToolingBody(file);
       if (options.broadSource) {
@@ -1278,9 +1285,7 @@ fi
     for (const file of workflowFiles) {
       const broad = runToolingFixture(file, { broadSource: true });
       expect(broad.result.status, `${file}: broad source should fail`).toBe(100);
-      expect(fs.existsSync(broad.installSentinel)).toBe(false);
-      expect(fs.existsSync(broad.adapterSentinel)).toBe(false);
-      expect(fs.existsSync(broad.kvmSentinel)).toBe(false);
+      expectFilesExist(false, broad.installSentinel, broad.adapterSentinel, broad.kvmSentinel);
 
       const restricted = runToolingFixture(file);
       expect(
@@ -1292,23 +1297,28 @@ fi
         `-o Dir::Etc::sourcelist=${restricted.aptSource} -o Dir::Etc::sourceparts=${restricted.aptSourceParts} install -y --no-install-recommends imagemagick`,
       ]);
       expect(pathExists(restricted.aptSourceParts)).toBe(false);
-      expect(fs.existsSync(restricted.installSentinel)).toBe(true);
-      expect(fs.existsSync(restricted.adapterSentinel)).toBe(true);
-      expect(fs.existsSync(restricted.kvmSentinel)).toBe(true);
+      expectFilesExist(
+        true,
+        restricted.installSentinel,
+        restricted.adapterSentinel,
+        restricted.kvmSentinel,
+      );
 
       const failedUpdate = runToolingFixture(file, { updateExit: 100 });
       expect(failedUpdate.result.status).toBe(100);
       expect(failedUpdate.calls).toHaveLength(1);
-      expect(fs.existsSync(failedUpdate.installSentinel)).toBe(false);
-      expect(fs.existsSync(failedUpdate.adapterSentinel)).toBe(false);
-      expect(fs.existsSync(failedUpdate.kvmSentinel)).toBe(false);
+      expectFilesExist(
+        false,
+        failedUpdate.installSentinel,
+        failedUpdate.adapterSentinel,
+        failedUpdate.kvmSentinel,
+      );
 
       for (const sourceState of ["missing", "empty"] as const) {
         const guarded = runToolingFixture(file, { sourceState });
         expect(guarded.result.status, `${file}: ${sourceState} source`).not.toBe(0);
         expect(guarded.calls).toEqual([]);
-        expect(fs.existsSync(guarded.adapterSentinel)).toBe(false);
-        expect(fs.existsSync(guarded.kvmSentinel)).toBe(false);
+        expectFilesExist(false, guarded.adapterSentinel, guarded.kvmSentinel);
       }
 
       for (const sourcePartsState of ["directory", "symlink"] as const) {
@@ -1316,8 +1326,7 @@ fi
         expect(guarded.result.status, `${file}: ${sourcePartsState} source parts`).not.toBe(0);
         expect(guarded.calls).toEqual([]);
         expect(pathExists(guarded.aptSourceParts)).toBe(true);
-        expect(fs.existsSync(guarded.adapterSentinel)).toBe(false);
-        expect(fs.existsSync(guarded.kvmSentinel)).toBe(false);
+        expectFilesExist(false, guarded.adapterSentinel, guarded.kvmSentinel);
       }
     }
   });
@@ -1377,25 +1386,26 @@ fi
       path.join(home, ".bash_profile"),
       'export PATH="$FIXTURE_LOGIN_BIN:/usr/bin:/bin"\n',
     );
-    fs.writeFileSync(
-      path.join(preparedBin, "pnpm"),
+    writeExecutable(
+      preparedBin,
+      "pnpm",
       [
         "#!/bin/bash",
         'printf "pnpm:%s\\n" "$*" >>"$FIXTURE_EVENTS"',
         "exec /bin/bash -lc 'source ./scripts/lib/ios-fastlane.sh && cd apps/ios && run_ios_fastlane ios signing_check'",
         "",
       ].join("\n"),
-      { mode: 0o755 },
     );
-    fs.writeFileSync(
-      path.join(loginBin, "bundle"),
+    writeExecutable(
+      loginBin,
+      "bundle",
       ["#!/bin/bash", 'printf "login-bundle:%s\\n" "$*" >>"$FIXTURE_EVENTS"', "exit 42", ""].join(
         "\n",
       ),
-      { mode: 0o755 },
     );
-    fs.writeFileSync(
-      path.join(preparedBin, "bundle"),
+    writeExecutable(
+      preparedBin,
+      "bundle",
       shell(
         '[[ "$BUNDLE_GEMFILE" == "$FIXTURE_WORKSPACE/apps/ios/Gemfile" ]]',
         '[[ "$PWD" == "$FIXTURE_WORKSPACE/apps/ios" ]]',
@@ -1406,16 +1416,15 @@ fi
         "  exit 43",
         "fi",
       ),
-      { mode: 0o755 },
     );
-    fs.writeFileSync(
-      path.join(preparedBin, "node"),
+    writeExecutable(
+      preparedBin,
+      "node",
       shell(
         '[[ "$PWD" == "$FIXTURE_WORKSPACE" ]]',
         '[[ "$*" == ".github/actions/ios-signing-keychain/keychain.mjs probe" ]]',
         'printf "probe:root-cwd\\n" >>"$FIXTURE_EVENTS"',
       ),
-      { mode: 0o755 },
     );
 
     const runSigningProof = (extraEnv: NodeJS.ProcessEnv = {}) => {
@@ -1477,28 +1486,21 @@ fi
     const environmentFile = path.join(runnerTemp, "environment");
     const stateFile = path.join(runnerTemp, "state");
     fs.mkdirSync(fakeBin);
-    fs.writeFileSync(path.join(fakeBin, "bundle"), '#!/bin/sh\n: > "$BUNDLE_MARKER"\nexit 99\n', {
-      mode: 0o700,
-    });
+    writeExecutable(fakeBin, "bundle", '#!/bin/sh\n: > "$BUNDLE_MARKER"\nexit 99\n', 0o700);
 
     const result = spawnSync(process.execPath, [".github/actions/ios-signing-keychain/post.mjs"], {
       cwd: process.cwd(),
       encoding: "utf8",
-      env: {
-        ...process.env,
+      env: signingEnv(workspace, runnerTemp, {
         BUNDLE_MARKER: bundleMarker,
         GITHUB_ENV: environmentFile,
         GITHUB_STATE: stateFile,
-        GITHUB_WORKSPACE: workspace,
         PATH: `${fakeBin}:/usr/bin:/bin`,
-        RUNNER_TEMP: runnerTemp,
-      },
+      }),
     });
 
     expect(result.status, result.stderr).toBe(0);
-    expect(fs.existsSync(bundleMarker)).toBe(false);
-    expect(fs.existsSync(environmentFile)).toBe(false);
-    expect(fs.existsSync(stateFile)).toBe(false);
+    expectFilesExist(false, bundleMarker, environmentFile, stateFile);
     expect(
       fs
         .readdirSync(runnerTemp)
@@ -1515,13 +1517,10 @@ fi
       );
       const environmentFile = path.join(runnerTemp, "environment");
       const stateFile = path.join(runnerTemp, "state");
-      const env = {
-        ...process.env,
+      const env = signingEnv(workspace, runnerTemp, {
         GITHUB_ENV: environmentFile,
         GITHUB_STATE: stateFile,
-        GITHUB_WORKSPACE: workspace,
-        RUNNER_TEMP: runnerTemp,
-      };
+      });
       let actionOutput = "";
       const output = {
         write(value: string) {
@@ -1609,13 +1608,10 @@ fi
       );
       const environmentFile = path.join(runnerTemp, "environment");
       const stateFile = path.join(runnerTemp, "state");
-      const env = {
-        ...process.env,
+      const env = signingEnv(workspace, runnerTemp, {
         GITHUB_ENV: environmentFile,
         GITHUB_STATE: stateFile,
-        GITHUB_WORKSPACE: workspace,
-        RUNNER_TEMP: runnerTemp,
-      };
+      });
       const createCommand = async (_command: string, args: string[]) => {
         const requestedPath = args.find((argument) => argument.startsWith("path:"))?.slice(5);
         if (!requestedPath) {
@@ -1655,11 +1651,7 @@ fi
     }
 
     const runnerTemp = tempRoots.make("openclaw-ios-keychain-guard-runner-");
-    const env = {
-      ...process.env,
-      GITHUB_WORKSPACE: workspace,
-      RUNNER_TEMP: runnerTemp,
-    };
+    const env = signingEnv(workspace, runnerTemp);
     const outsidePath = path.join(runnerTemp, "outside.keychain-db");
     fs.writeFileSync(outsidePath, "not owned\n");
     const ownedRoot = fs.mkdtempSync(path.join(runnerTemp, "openclaw-ios-signing-keychain-"));
@@ -1711,10 +1703,24 @@ fi
       `${JSON.stringify({ teamId: "FWJYW4S8P8" }, null, 2)}\n`,
     );
     const identityHash = "A".repeat(40);
+    const probe = (
+      keychainPath: string,
+      runCommand: (
+        executable: string,
+        args: string[],
+        options: { timeoutMs?: number },
+      ) => Promise<{ stderr: string; stdout: string }>,
+    ) =>
+      probeOwnedKeychain({
+        env: signingEnv(workspace, runnerTemp, { MATCH_KEYCHAIN_NAME: keychainPath }),
+        runCommand,
+      });
     for (const keychainFilename of ["signing.keychain", "signing.keychain-db"] as const) {
-      const ownedRoot = fs.mkdtempSync(path.join(runnerTemp, "openclaw-ios-signing-keychain-"));
-      const keychainPath = path.join(ownedRoot, keychainFilename);
-      fs.writeFileSync(keychainPath, "owned keychain\n");
+      const { file: keychainPath } = ownedKeychain(
+        runnerTemp,
+        keychainFilename,
+        "owned keychain\n",
+      );
       const calls: Array<{ args: string[]; executable: string; timeoutMs?: number }> = [];
       const runCommand = async (
         executable: string,
@@ -1742,17 +1748,7 @@ fi
         return { stderr: "", stdout: "" };
       };
 
-      await expect(
-        probeOwnedKeychain({
-          env: {
-            ...process.env,
-            GITHUB_WORKSPACE: workspace,
-            MATCH_KEYCHAIN_NAME: keychainPath,
-            RUNNER_TEMP: runnerTemp,
-          },
-          runCommand,
-        }),
-      ).resolves.toEqual({
+      await expect(probe(keychainPath, runCommand)).resolves.toEqual({
         identity: "Apple Distribution: OpenClaw Foundation (FWJYW4S8P8)",
         teamId: "FWJYW4S8P8",
       });
@@ -1773,17 +1769,14 @@ fi
       ).toBe(false);
     }
 
-    const wrongTeamRoot = fs.mkdtempSync(path.join(runnerTemp, "openclaw-ios-signing-keychain-"));
-    const wrongTeamPath = path.join(wrongTeamRoot, "signing.keychain");
-    fs.writeFileSync(wrongTeamPath, "owned keychain\n");
+    const { file: wrongTeamPath } = ownedKeychain(
+      runnerTemp,
+      "signing.keychain",
+      "owned keychain\n",
+    );
     await expect(
       probeOwnedKeychain({
-        env: {
-          ...process.env,
-          GITHUB_WORKSPACE: workspace,
-          MATCH_KEYCHAIN_NAME: wrongTeamPath,
-          RUNNER_TEMP: runnerTemp,
-        },
+        env: signingEnv(workspace, runnerTemp, { MATCH_KEYCHAIN_NAME: wrongTeamPath }),
         runCommand: async () => ({
           stderr: "",
           stdout: `  1) ${identityHash} "Apple Distribution: Other Team (AAAAAAAAAA)"\n`,
@@ -1796,33 +1789,17 @@ fi
       unsafeCommandCount += 1;
       return { stderr: "", stdout: "" };
     };
-    const missingRoot = fs.mkdtempSync(path.join(runnerTemp, "openclaw-ios-signing-keychain-"));
-    await expect(
-      probeOwnedKeychain({
-        env: {
-          ...process.env,
-          GITHUB_WORKSPACE: workspace,
-          MATCH_KEYCHAIN_NAME: path.join(missingRoot, "signing.keychain"),
-          RUNNER_TEMP: runnerTemp,
-        },
-        runCommand: rejectUnsafeCommand,
-      }),
-    ).rejects.toThrow("Owned keychain is missing");
-    const symlinkRoot = fs.mkdtempSync(path.join(runnerTemp, "openclaw-ios-signing-keychain-"));
+    const { file: missingPath } = ownedKeychain(runnerTemp);
+    const { file: symlinkPath } = ownedKeychain(runnerTemp);
     const symlinkTarget = path.join(runnerTemp, "foreign.keychain");
     fs.writeFileSync(symlinkTarget, "foreign keychain\n");
-    fs.symlinkSync(symlinkTarget, path.join(symlinkRoot, "signing.keychain"));
-    await expect(
-      probeOwnedKeychain({
-        env: {
-          ...process.env,
-          GITHUB_WORKSPACE: workspace,
-          MATCH_KEYCHAIN_NAME: path.join(symlinkRoot, "signing.keychain"),
-          RUNNER_TEMP: runnerTemp,
-        },
-        runCommand: rejectUnsafeCommand,
-      }),
-    ).rejects.toThrow("Owned keychain path is not a regular file");
+    fs.symlinkSync(symlinkTarget, symlinkPath);
+    for (const [file, error] of [
+      [missingPath, "Owned keychain is missing"],
+      [symlinkPath, "Owned keychain path is not a regular file"],
+    ] as const) {
+      await expect(probe(file, rejectUnsafeCommand)).rejects.toThrow(error);
+    }
     expect(unsafeCommandCount).toBe(0);
   });
 
