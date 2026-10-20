@@ -277,6 +277,68 @@ it("settles a prior-boot family with an unreadable recycled owner PID", async ()
   expect(nextUpdate(nextStore)).toBe("acquired");
 });
 
+it.each(["before", "retained-child", "at-margin", "after", "unreadable", "runtime-holder"])(
+  "repairs a legacy handoff using its durable write time and boot time: %s",
+  async (observation) => {
+    const now = Date.parse("2026-10-20T12:00:00.000Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const bootStartedAt = now - 60_000;
+    const before = ["before", "retained-child", "unreadable", "runtime-holder"].includes(
+      observation,
+    );
+    const previous = fixture.seed({
+      legacy: "original",
+      ageMs: before ? 6 * 60_000 + 1 : observation === "at-margin" ? 6 * 60_000 : 59_999,
+    });
+    const child =
+      observation === "retained-child"
+        ? fixture.seed({ legacy: "retained", ageMs: 6 * 60_000 + 1 })
+        : undefined;
+    fixture.births.set(fixture.helper.pid, null);
+    vi.spyOn(fixture.store, "bootIdentity").mockImplementation(() => {
+      if (observation === "unreadable") {
+        throw new Error("OS boot time unavailable");
+      }
+      return {
+        platform: "win32",
+        identity: new Date(bootStartedAt).toISOString().replace(".000Z", ".0000000Z"),
+      };
+    });
+    if (observation === "runtime-holder") {
+      fixture.processCensus.matchingPids.push(81234);
+    }
+    if (!["before", "retained-child"].includes(observation)) {
+      await expect(prepareRepair()).rejects.toThrow(
+        observation === "runtime-holder" ? /PID 81234/ : /Handoff owners are live or unverified/,
+      );
+      expect(fixture.store.read(previous.key)).toEqual({ kind: "current", lease: previous });
+      expect(nextUpdate()).toBe("busy");
+      expect(ledger.listUpdateRuns({}, { env })).toEqual([]);
+      return;
+    }
+    using repair = await prepareRepair();
+    const run = newRun();
+    repair.bindRun(run.runId);
+    if (child) {
+      const record = ledger.recordUpdateRunStep;
+      vi.spyOn(ledger, "recordUpdateRunStep").mockImplementation((...args) => {
+        if (args[1].step === "finalize:handoff-settlement") {
+          expect(fixture.store.read(child.key)).toEqual({ kind: "current", lease: child });
+        }
+        return record(...args);
+      });
+    }
+    repair.complete(run.runId);
+    expect(settlement(run.runId)?.status).toBe("completed");
+    expect(fixture.store.read(previous.key)).toEqual({ kind: "absent" });
+    if (child) {
+      expect(fixture.store.read(child.key)).toEqual({ kind: "absent" });
+    }
+    expect(fixture.store.read(fixture.root)).toEqual({ kind: "absent" });
+    expect(nextUpdate()).toBe("acquired");
+  },
+);
+
 it.each(["missing-recorded", "unknown-recorded", "unknown-current", "unreadable-current"])(
   "preserves owner liveness checks with %s boot identity",
   async (observation) => {

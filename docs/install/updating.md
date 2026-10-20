@@ -72,7 +72,9 @@ inactivity grace period. Live or unverifiable drivers and retained recovery
 continue to preserve their ownership.
 
 Handoff repair uses recorded boot sessions and process creation times to exclude
-prior-boot families and unrelated processes with reused parent PIDs. Unverified
+prior-boot families and unrelated processes with reused parent PIDs. On Windows,
+a legacy handoff without a boot identity also qualifies as prior-boot when its
+durable write is more than five minutes before the current boot started. Unverified
 descendants and incomplete process censuses block settlement to prevent overlapping
 updaters. Positive handoff descendants, OpenClaw identities, and retained-runtime
 path holders also block repair. This does not relax Doctor's artifact-custody
