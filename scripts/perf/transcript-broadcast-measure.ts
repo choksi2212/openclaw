@@ -2461,6 +2461,28 @@ try {
       allocatedMbPerTurn: profile.sampledAllocatedBytes / 1_000_000 / completedTurns,
     };
   }
+  let retainedProfile;
+  if (soakScenario) {
+    await sampleMemory();
+    if (retainedProfileStartedAt !== undefined) {
+      // Preserve retained-profile collection without collecting the workers before their idle phase.
+      await readGatewayResources(gateway, { collectGarbage: true });
+      await controlGatewayProfile(gateway, "heap", "stop", retainedProfilePath);
+      const { sampledAllocatedBytes, topAllocationSites, ...profile } = readGatewayHeapProfile(
+        retainedProfilePath,
+        { includeCollectedObjects: false },
+      );
+      retainedProfile = {
+        ...profile,
+        startedAtEpochMs: retainedProfileStartedAt,
+        stoppedAtEpochMs: Date.now(),
+        sampledRetainedBytes: sampledAllocatedBytes,
+        topRetainedSites: topAllocationSites,
+      };
+    } else if (retainedProfileMs > 0) {
+      throw new Error("no retained profile window captured; shorten the round duration");
+    }
+  }
   let diffEditVisibilityMs: number | undefined;
   if (values["mixed-rpc"] && stressWorktree && diffControlOriginal !== undefined) {
     writeFileSync(
@@ -2503,27 +2525,7 @@ try {
     }
     await removeStressCron();
   }
-  let retainedProfile;
   if (soakScenario) {
-    await sampleMemory();
-    if (retainedProfileStartedAt !== undefined) {
-      // Preserve retained-profile collection without collecting the workers before their idle phase.
-      await readGatewayResources(gateway, { collectGarbage: true });
-      await controlGatewayProfile(gateway, "heap", "stop", retainedProfilePath);
-      const { sampledAllocatedBytes, topAllocationSites, ...profile } = readGatewayHeapProfile(
-        retainedProfilePath,
-        { includeCollectedObjects: false },
-      );
-      retainedProfile = {
-        ...profile,
-        startedAtEpochMs: retainedProfileStartedAt,
-        stoppedAtEpochMs: Date.now(),
-        sampledRetainedBytes: sampledAllocatedBytes,
-        topRetainedSites: topAllocationSites,
-      };
-    } else if (retainedProfileMs > 0) {
-      throw new Error("no retained profile window captured; shorten the round duration");
-    }
     if (idleDurationMs > 0) {
       if (values["worker-snapshots"]) {
         const snapshots = await readGatewayResources(gateway, {
