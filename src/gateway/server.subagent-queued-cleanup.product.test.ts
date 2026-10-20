@@ -1,7 +1,6 @@
-// Prove queued subagent Stop cleanup through real model, ingress, and control boundaries.
 import { X509Certificate } from "node:crypto";
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { text } from "node:stream/consumers";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, it, vi } from "vitest";
 import { startOpenAiResponsesModelServer } from "../../test/helpers/openai-responses-model-fixture.js";
 import {
@@ -44,18 +43,16 @@ let responseSequence = 0;
 function toolCallEvents(name: string, args: Record<string, unknown>) {
   // Preserve the streamed call sequence; the real runner executes the tools.
   const sequence = ++responseSequence;
-  const responseId = `resp_queued_cleanup_${sequence}`;
   const itemId = `fc_queued_cleanup_${sequence}`;
-  const callId = `call_queued_cleanup_${sequence}`;
   const argumentsText = JSON.stringify(args);
   const item = {
     type: "function_call",
     id: itemId,
-    call_id: callId,
+    call_id: `call_queued_cleanup_${sequence}`,
     name,
     arguments: argumentsText,
   };
-  const response = { id: responseId, object: "response" };
+  const response = { id: `resp_queued_cleanup_${sequence}`, object: "response" };
   const argumentEvent = (type: string, data: Record<string, unknown>) => ({
     type: `response.function_call_arguments.${type}`,
     item_id: itemId,
@@ -92,13 +89,11 @@ function findSpawnReceipt(value: unknown): SpawnReceipt | undefined {
       return undefined;
     }
   }
-  if (value && typeof value === "object") {
+  if (isRecord(value) || Array.isArray(value)) {
     if (
-      "status" in value &&
+      isRecord(value) &&
       value.status === "accepted" &&
-      "childSessionKey" in value &&
       typeof value.childSessionKey === "string" &&
-      "runId" in value &&
       typeof value.runId === "string"
     ) {
       return { childSessionKey: value.childSessionKey, runId: value.runId };
@@ -114,7 +109,6 @@ function findSpawnReceipt(value: unknown): SpawnReceipt | undefined {
 }
 
 async function startYieldModelServer(allowYield: Promise<void>) {
-  // Hold the child until ingress queues a follow-up, then emit sessions_yield.
   const childAccepted = createDeferred<SpawnReceipt>();
   const childModelStarted = createDeferred();
   let yieldSent = false;
@@ -123,48 +117,38 @@ async function startYieldModelServer(allowYield: Promise<void>) {
     modelId: "stop-proof",
     bindError: "Expected queued cleanup model server address",
     onRequest: async (request, response) => {
-      try {
-        await handleRequest(request, response);
-      } catch (error) {
-        if (!response.headersSent) {
-          response.writeHead(500, { "content-type": "application/json" });
-        }
-        response.end(JSON.stringify({ error: { message: String(error) } }));
+      const body = await text(request);
+      const parsed = JSON.parse(body) as unknown;
+      if (body.includes(queuedInput)) {
+        queuedInputRequests += 1;
       }
+      // Only the fresh child attempt carries its task without a prior tool result.
+      if (body.includes(childTask) && !body.includes("function_call_output")) {
+        childModelStarted.resolve();
+        await allowYield;
+        yieldSent = true;
+        writeOpenAiResponsesSse(response, toolCallEvents("sessions_yield", { waitFor: "message" }));
+        return;
+      }
+      // The parent's next request carries the accepted child key in its tool output.
+      if (body.includes(parentPrompt) && !body.includes("function_call_output")) {
+        writeOpenAiResponsesSse(
+          response,
+          toolCallEvents("sessions_spawn", { task: childTask, context: "isolated" }),
+        );
+        return;
+      }
+      const receipt = findSpawnReceipt(parsed);
+      if (receipt) {
+        childAccepted.resolve(receipt);
+      }
+      writeOpenAiResponsesText(response, {
+        text: body.includes(childTask) ? "NO_REPLY" : "Child accepted.",
+        responseId: `response-${++responseSequence}`,
+        messageId: `message-${responseSequence}`,
+      });
     },
   });
-  async function handleRequest(request: IncomingMessage, response: ServerResponse) {
-    const body = await text(request);
-    const parsed = JSON.parse(body) as unknown;
-    if (body.includes(queuedInput)) {
-      queuedInputRequests += 1;
-    }
-    // Only the fresh child attempt carries its task without a prior tool result.
-    if (body.includes(childTask) && !body.includes("function_call_output")) {
-      childModelStarted.resolve();
-      await allowYield;
-      yieldSent = true;
-      writeOpenAiResponsesSse(response, toolCallEvents("sessions_yield", { waitFor: "message" }));
-      return;
-    }
-    // The parent's next request carries the accepted child key in its tool output.
-    if (body.includes(parentPrompt) && !body.includes("function_call_output")) {
-      writeOpenAiResponsesSse(
-        response,
-        toolCallEvents("sessions_spawn", { task: childTask, context: "isolated" }),
-      );
-      return;
-    }
-    const receipt = findSpawnReceipt(parsed);
-    if (receipt) {
-      childAccepted.resolve(receipt);
-    }
-    writeOpenAiResponsesText(response, {
-      text: body.includes(childTask) ? "NO_REPLY" : "Child accepted.",
-      responseId: `response-${++responseSequence}`,
-      messageId: `message-${responseSequence}`,
-    });
-  }
   return {
     childAccepted: childAccepted.promise,
     childModelStarted: childModelStarted.promise,
@@ -280,14 +264,12 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
               AgentId: "main",
               Provider: "test",
               Surface: "test",
-              ChatType: "direct",
               From: "user:queued-cleanup",
               To: "channel:queued-cleanup",
               SessionKey: event.payload.text,
               MessageSid: event.id,
               Body: queuedInput,
               CommandBody: queuedInput,
-              BodyForAgent: queuedInput,
             }),
             cfg,
             dispatcherOptions: { deliver: async () => undefined },
@@ -307,7 +289,6 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
       expect(deferredMode).toBe("followup");
       await expect(queue.listClaims()).resolves.toHaveLength(1);
 
-      // Yield leaves the task nonterminal: public Stop must clean up its queued input.
       allowYield.resolve();
       await childTerminal.promise;
       vi.useFakeTimers({ toFake: ["setTimeout"] });
@@ -320,8 +301,7 @@ it("bounds public child Stop while yielded queued-input cleanup remains pending"
         "Stop responded before joining the held source cleanup",
       );
       await vi.advanceTimersByTimeAsync(SESSION_CONTROLLER_DRAIN_TIMEOUT_MS * 2 + 1);
-      const settledResponse = await stopResponse;
-      expect(settledResponse).toMatchObject({
+      expect(await stopResponse).toMatchObject({
         status: 503,
         body: {
           ok: false,

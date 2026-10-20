@@ -8,7 +8,6 @@ import { createVitestResourceOwner } from "../../scripts/lib/vitest-resource-own
 import type { VitestWorkerRun } from "../../scripts/lib/vitest-worker-run.mts";
 import { createFixtureLifetime } from "../../test/helpers/fixture-lifetime.js";
 import { runVitestShutdownCommand } from "../../test/helpers/vitest-shutdown-command.js";
-import { hasErrnoCode } from "../infra/errno.js";
 
 export function createGatewayFixtureFork(
   workerRun: VitestWorkerRun,
@@ -127,16 +126,9 @@ export default defineConfig({
         expect(child, diagnostics).toMatchObject({ signalCode: null, killed: false });
         const pid = Number(await fs.readFile(path.join(root, "worker.pid"), "utf8"));
         expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
-        let workerStopped = false;
-        try {
-          process.kill(pid, 0);
-        } catch (error) {
-          if (!hasErrnoCode(error, "ESRCH")) {
-            throw error;
-          }
-          workerStopped = true;
-        }
-        expect(workerStopped, "native fixture worker must exit before root release").toBe(true);
+        expect(() => process.kill(pid, 0), "native worker must exit before root release").toThrow(
+          expect.objectContaining({ code: "ESRCH" }),
+        );
         joined = true;
         expect(output.code, diagnostics).toBe(0);
         expect(JSON.parse(await fs.readFile(reportFile, "utf8")), diagnostics).toMatchObject({

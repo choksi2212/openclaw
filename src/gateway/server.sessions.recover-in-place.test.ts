@@ -28,12 +28,10 @@ import { resolveWorkerPlacementSessionRuntimeAsync } from "./worker-environments
 afterEach(() => drainGlobalSingletonLifecycleState());
 const { createSessionStoreDir } = setupGatewaySessionsHandlerTestHarness();
 const prepareProfiles = useUserProfileCatalogForTest();
+const emptyDispatch = () => ({ queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } });
 beforeEach(async () => {
   await prepareProfiles();
-  dispatchInboundMessageMock.mockReset().mockResolvedValue({
-    queuedFinal: false,
-    counts: { block: 0, final: 0, tool: 0 },
-  });
+  dispatchInboundMessageMock.mockReset().mockResolvedValue(emptyDispatch());
 });
 let requestSequence = 0;
 
@@ -47,6 +45,7 @@ async function fixture(
   const key = `agent:main:dashboard:${name}`;
   const sessionId = `${name}-session`;
   const recoveryCycleId = `cycle-${name}`;
+  const identity = { key, sessionId, recoveryCycleId };
   const owner = roleClient("view", `${name}-owner`);
   const operator = roleClient("write", `${name}-operator`);
   const retainedMetadata = {
@@ -137,9 +136,7 @@ async function fixture(
   const scope = { agentId: "main", sessionKey: key, sessionId, storePath };
   const transcript = () => loadTranscriptEvents(scope);
   return {
-    key,
-    sessionId,
-    recoveryCycleId,
+    ...identity,
     storePath,
     scope,
     operator,
@@ -183,12 +180,10 @@ async function recover(
         recoveryCycleId: current.recoveryCycleId,
       },
     },
+    ...options,
     client: options.client ?? current.operator,
     context: current.context,
     isWebchatConnect: () => false,
-    ...(options.hasCurrentClientAuthority
-      ? { hasCurrentClientAuthority: options.hasCurrentClientAuthority }
-      : {}),
     respond: (ok, payload, error) => {
       response = { ok, payload: payload as SessionsRecoverResult | undefined, error };
     },
@@ -221,16 +216,14 @@ test.for([false, true])(
     const before = await current.transcript();
     const dispatched = createDeferredCore();
     const finish = createDeferredCore();
-    let calls = 0;
     dispatchInboundMessageMock.mockImplementation(async ({ ctx, replyOptions }) => {
-      calls += 1;
       try {
-        expect(ctx.SessionKey).toBe(current.key);
-        expect(replyOptions?.operatorAuthority?.profileId).toBe(
-          current.operator.authenticatedUserProfile!.profileId,
-        );
+        expect(ctx).toMatchObject({ SessionKey: current.key });
+        expect(replyOptions).toMatchObject({
+          operatorAuthority: { profileId: current.operator.authenticatedUserProfile!.profileId },
+          forceRestartSafeTools: true,
+        });
         replyOptions?.operatorAuthority?.assertCurrent();
-        expect(replyOptions?.forceRestartSafeTools).toBe(true);
         expect(current.entry()).toMatchObject({
           sessionId: current.sessionId,
           ...current.retainedMetadata,
@@ -242,13 +235,13 @@ test.for([false, true])(
         expect(await current.transcript()).toEqual(before);
         dispatched.resolve();
         await finish.promise;
-        return { queuedFinal: false, counts: { block: 0, final: 0, tool: 0 } };
+        return emptyDispatch();
       } catch (error) {
         dispatched.reject(error);
         throw error;
       }
     });
-    let failure: Error | undefined;
+    const failures: unknown[] = [];
     try {
       const results = await Promise.all([recover(current), recover(current)]);
       const resumed = results.find((result) => result.ok);
@@ -257,39 +250,33 @@ test.for([false, true])(
       await withinTest(dispatched.promise, signal);
       const repeated = await recover(current);
       expect(repeated, JSON.stringify(repeated)).toMatchObject({ ok: false });
-      expect(calls).toBe(1);
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
       expect((await listSessionPendingInputs(current.scope)).items).toHaveLength(1);
       expect(current.entry()?.archivedAt).toBeUndefined();
     } catch (error) {
-      failure = error instanceof Error ? error : new Error("Resume failed", { cause: error });
+      failures.push(error);
     } finally {
       finish.resolve();
-      if (failure) {
+      if (failures.length) {
         for (const { entry } of listRpcSourceEntriesForSession({
           sessionKeys: [current.key],
           sessionIds: [current.sessionId],
           agentId: "main",
           storeScope: current.storePath,
         })) {
-          requestRpcSourceCancellation(entry, failure);
+          requestRpcSourceCancellation(entry, failures[0]);
         }
       }
       try {
         await withinTest(current.drain(), signal);
       } catch (cleanupError) {
-        failure = failure
-          ? new AggregateError([failure, cleanupError], "Resume failed before cleanup settled", {
-              cause: cleanupError,
-            })
-          : cleanupError instanceof Error
-            ? cleanupError
-            : new Error("Resume cleanup failed", { cause: cleanupError });
+        failures.push(cleanupError);
       }
     }
-    if (failure) {
-      throw failure;
+    if (failures.length) {
+      throw new AggregateError(failures, "Resume or cleanup failed");
     }
-    expect(calls).toBe(1);
+    expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
   },
 );
 

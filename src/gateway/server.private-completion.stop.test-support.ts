@@ -63,6 +63,12 @@ async function waitForStop(command: AgentCommandOpts, release: ReturnType<typeof
   throw new Error("operator stop must prevent further work");
 }
 
+function releaseOnAbort(signal: AbortSignal) {
+  const release = createDeferred();
+  signal.addEventListener("abort", () => release.resolve(), { once: true });
+  return release;
+}
+
 export function registerPrivateCompletionStopTests(getFixture: () => PrivateCompletionStopFixture) {
   it.for([false, true])(
     "preserves an operator stop after private input consumption across retry and restart (terminal first=%s)",
@@ -99,8 +105,7 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
       });
       onTestFinished(() => metadataOverlap.dispose());
       const consumed = createDeferred();
-      const release = createDeferred();
-      signal.addEventListener("abort", () => release.resolve(), { once: true });
+      const release = releaseOnAbort(signal);
       agentCommandMock.mockImplementationOnce(async (input) => {
         const command = input as AgentCommandOpts;
         await command.onExecutionStarted?.();
@@ -131,9 +136,8 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
         onTestFinished(() => lock.mockRestore());
       }
       const childStarted = createDeferred();
-      const releaseChild = createDeferred();
+      const releaseChild = releaseOnAbort(signal);
       let childAbortSignal: AbortSignal | undefined;
-      signal.addEventListener("abort", () => releaseChild.resolve(), { once: true });
       await writeSubagentSessionEntry({
         stateDir: process.env.OPENCLAW_STATE_DIR!,
         agentId: "main",
@@ -178,16 +182,14 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
           }
           return wait;
         });
-      // Cancellation must release the admission barrier so cleanup can join both producers.
       const releaseWaitAdmission = () => childWaitEntered.resolve();
       signal.addEventListener("abort", releaseWaitAdmission, { once: true });
       try {
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           childStarted.promise,
-          observedChild.then(() => {
-            throw new Error("continuation child finished before execution started");
-          }),
-        ]);
+          observedChild,
+          "continuation child finished before execution started",
+        );
         await registerSubagentRun({
           runId: descendantRunId,
           childSessionKey,
@@ -235,9 +237,8 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
         }
       }
       await settleSubagentRegistryPersistenceWork();
-      expect(await observedChild).toMatchObject({
-        value: { status: "timeout", stopReason: "rpc" },
-      });
+      const stopped = { value: { status: "timeout", stopReason: "rpc" } };
+      expect(await observedChild).toMatchObject(stopped);
       expect(descendant()).toBeUndefined();
       expect(f.completions()).toMatchObject([{ succeeded: 0 }]);
       expect(JSON.parse(String(f.completions()[0]?.outcome_json))).toMatchObject({
@@ -245,18 +246,17 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
         stopReason: "rpc",
       });
       expect(f.pending()).toEqual([]);
-      expect(await observed).toMatchObject({ value: { status: "timeout", stopReason: "rpc" } });
+      expect(await observed).toMatchObject(stopped);
       // Retire only this run's process projection to exercise the durable receipt.
       f.kernel.gatewayRequestContext.dedupe.delete(`agent:${runId}`);
       expect(await f.dispatch()).toMatchObject({ status: "error", stopReason: "rpc" });
       await f.restart();
       expect(await f.dispatch()).toMatchObject({ status: "error", stopReason: "rpc" });
-      expect(
-        agentCommandMock.mock.calls.map(([input]) => {
-          const command = input as AgentCommandOpts;
-          return { runId: command.runId, sessionId: command.sessionId };
-        }),
-      ).toEqual([
+      const commands = agentCommandMock.mock.calls.map(([input]) => {
+        const command = input as AgentCommandOpts;
+        return { runId: command.runId, sessionId: command.sessionId };
+      });
+      expect(commands).toEqual([
         { runId, sessionId },
         { runId: descendantRunId, sessionId: childSessionId },
       ]);
@@ -273,10 +273,7 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
       let producerReturned = false;
       f.agentCommandMock.mockImplementationOnce(async (input) => {
         const command = input as AgentCommandOpts;
-        const operation = expectDefined(
-          getCurrentSessionControllerOwner(),
-          "admitted command owner",
-        );
+        const operation = expectDefined(getCurrentSessionControllerOwner(), "command owner");
         markReplyOperationExecutionStarted(operation);
         await command.onExecutionStarted?.();
         const inputRecorder = f.recorder(input);
@@ -379,10 +376,10 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
         }
       }
       const response = await observed;
-      const rows = f.completions();
-      const outcome = JSON.parse(String(rows[0]?.outcome_json));
-      expect(response).toMatchObject({ value: { status: "timeout", stopReason: "timeout" } });
-      expect(outcome).toMatchObject({ status: "timeout", stopReason: "timeout" });
+      const outcome = JSON.parse(String(f.completions()[0]?.outcome_json));
+      const timeout = { status: "timeout", stopReason: "timeout" };
+      expect(response).toMatchObject({ value: timeout });
+      expect(outcome).toMatchObject(timeout);
       expect(
         await waitForChatAbortControllerRemoval({
           targets: [{ runId, entry: active }],
@@ -392,14 +389,9 @@ export function registerPrivateCompletionStopTests(getFixture: () => PrivateComp
       expect(f.source(runId)).toBeUndefined();
       expect(active.adapter.projectSessionTerminalPersisted).toBe(true);
       if (kind !== "rejected") {
-        expect(outcome).toMatchObject({
-          reason: "hard_timeout",
-          timeoutPhase: "provider",
-          providerStarted: true,
-        });
-        expect(response).toMatchObject({
-          value: { timeoutPhase: "provider", providerStarted: true },
-        });
+        const provider = { timeoutPhase: "provider", providerStarted: true };
+        expect(outcome).toMatchObject({ reason: "hard_timeout", ...provider });
+        expect(response).toMatchObject({ value: provider });
       } else {
         expect([outcome.reason, outcome.timeoutPhase, outcome.providerStarted]).toEqual([
           "timed_out",

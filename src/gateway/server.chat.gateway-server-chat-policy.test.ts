@@ -161,6 +161,14 @@ async function history(socket: WebSocket) {
   return response.payload;
 }
 
+const waitForRun = (socket: WebSocket, runId: string, timeoutMs = 1_000) =>
+  rpcReq(socket, "agent.wait", { runId, timeoutMs });
+async function startAgent(runId: string, sessionKey = "main") {
+  expect(
+    await rpcReq(ws, "agent", { sessionKey, message: "hold this run open", idempotencyKey: runId }),
+  ).toMatchObject({ ok: true, payload: { status: "accepted" } });
+}
+
 test("fixture cleanup joins the exact retained chat.send root", async () => {
   const admission = await import("../process/gateway-work-admission.js");
   const lease = admission.tryBeginGatewayRootWorkAdmission("ws:chat.send");
@@ -202,16 +210,13 @@ test.for([
     await withMainSessionStore(async () => {
       const run = async (socket: WebSocket) => {
         const idempotencyKey = `idem-chat-${field}-no-persist`;
-        expect(
-          (
-            await rpcReq(socket, "chat.send", {
-              sessionKey: "main",
-              message,
-              thinking,
-              idempotencyKey,
-            })
-          ).ok,
-        ).toBe(true);
+        const sent = await rpcReq(socket, "chat.send", {
+          sessionKey: "main",
+          message,
+          thinking,
+          idempotencyKey,
+        });
+        expect(sent.ok).toBe(true);
         await waitForAgentRunDrained(idempotencyKey, socket);
         expect(sessionEntry()?.[field]).toBeUndefined();
         if (!scoped) {
@@ -259,11 +264,10 @@ test("chat.send preserves sessions and denies operator.write reset triggers", as
         );
         expect(sendRes).toMatchObject({ ok: true, payload: { status: "started" } });
 
-        const waitRes = await rpcReq(scopedWs, "agent.wait", {
-          runId,
-          timeoutMs: 1_000,
+        expect(await waitForRun(scopedWs, runId)).toMatchObject({
+          ok: true,
+          payload: { status: "ok" },
         });
-        expect(waitRes).toMatchObject({ ok: true, payload: { status: "ok" } });
 
         expect(sessionEntry()).toMatchObject({ sessionId: "sess-main", ...resetState });
         expect(runSpy).not.toHaveBeenCalled();
@@ -306,43 +310,50 @@ test("chat.send /reset on an idle session finishes post-commit cleanup and recor
   }
 });
 
-test("agent.wait ignores stale chat dedupe when an agent run with the same runId is in flight", async () => {
-  const { promise: blockedAgentRun, resolve: resolveAgentRun } = createDeferred();
-  const agentSpy = vi.mocked(agentCommandMock);
-  agentSpy.mockImplementationOnce(async () => {
-    await blockedAgentRun;
-    return undefined;
-  });
-
-  const runId = "idem-wait-chat-vs-agent";
-  await withMainSessionStore(
-    async () => {
-      try {
-        await sendChatAndExpectStarted(runId);
-        await waitForAgentRunDrained(runId);
-
-        const agentRes = await rpcReq(ws, "agent", {
-          sessionKey: "main",
-          message: "hold this run open",
-          idempotencyKey: runId,
-        });
-        expect(agentRes).toMatchObject({ ok: true, payload: { status: "accepted" } });
-
-        const waitWhileAgentInFlight = await rpcReq(ws, "agent.wait", {
-          runId,
-          timeoutMs: 40,
-        });
-        expectAgentWaitTimeout(waitWhileAgentInFlight);
-
-        resolveAgentRun?.();
-        await waitForAgentRunDrained(runId);
-      } finally {
-        resolveAgentRun?.();
-      }
-    },
-    { freshStore: true },
-  );
-});
+test.for(["agent", "chat"] as const)(
+  "agent.wait ignores stale results while same-runId %s is active",
+  async (active) => {
+    const runId = `idem-wait-active-${active}`;
+    await withMainSessionStore(
+      async () => {
+        const blocked = createDeferred();
+        let release = blocked.resolve;
+        if (active === "agent") {
+          vi.mocked(agentCommandMock).mockImplementationOnce(async () => {
+            await blocked.promise;
+            return undefined;
+          });
+        }
+        try {
+          if (active === "agent") {
+            await sendChatAndExpectStarted(runId);
+            await waitForAgentRunDrained(runId);
+            await startAgent(runId);
+          } else {
+            await startAgent(runId, "agent:main:stale-wait-snapshot");
+            expect(await waitForRun(ws, runId)).toMatchObject({
+              ok: true,
+              payload: { status: "ok" },
+            });
+            await gatewaySuite.requestExecution.waitForCompletion(runId);
+            release = mockBlockedChatReply();
+            await sendChatAndExpectStarted(runId, "hold chat run open");
+          }
+          expectAgentWaitTimeout(await waitForRun(ws, runId, 40));
+          if (active === "agent") {
+            release();
+            await waitForAgentRunDrained(runId);
+          } else {
+            await abortChatRun(runId);
+          }
+        } finally {
+          release();
+        }
+      },
+      { freshStore: active === "agent" },
+    );
+  },
+);
 
 test("retains the session fixture while admitted dispatch settles after callback failure", async () => {
   const runId = "idem-fixture-dispatch-throw";
@@ -389,39 +400,4 @@ test("retains the session fixture while admitted dispatch settles after callback
   expect(await completion).toEqual([{ status: "rejected", reason: callbackError }]);
   expect(testState.sessionStorePath).toBeUndefined();
   await expect(fs.stat(fixtureDir)).rejects.toMatchObject({ code: "ENOENT" });
-});
-
-test("agent.wait ignores stale agent snapshots while same-runId chat.send is active", async () => {
-  await withMainSessionStore(async () => {
-    const runId = "idem-wait-chat-active-vs-stale-agent";
-    const seedAgentRes = await rpcReq(ws, "agent", {
-      sessionKey: "agent:main:stale-wait-snapshot",
-      message: "seed stale agent snapshot",
-      idempotencyKey: runId,
-    });
-    expect(seedAgentRes).toMatchObject({ ok: true, payload: { status: "accepted" } });
-
-    const seedWaitRes = await rpcReq(ws, "agent.wait", {
-      runId,
-      timeoutMs: 1_000,
-    });
-    expect(seedWaitRes).toMatchObject({ ok: true, payload: { status: "ok" } });
-    await gatewaySuite.requestExecution.waitForCompletion(runId);
-
-    const releaseBlockedReply = mockBlockedChatReply();
-
-    try {
-      await sendChatAndExpectStarted(runId, "hold chat run open");
-
-      const waitWhileChatActive = await rpcReq(ws, "agent.wait", {
-        runId,
-        timeoutMs: 40,
-      });
-      expectAgentWaitTimeout(waitWhileChatActive);
-
-      await abortChatRun(runId);
-    } finally {
-      releaseBlockedReply();
-    }
-  });
 });

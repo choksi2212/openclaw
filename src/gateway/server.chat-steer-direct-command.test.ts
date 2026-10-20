@@ -4,7 +4,11 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
 import { expect, it, onTestFinished, vi } from "vitest";
 import type { RawData } from "ws";
-import { createDeferred, withinTest } from "../../test/helpers/promise.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../test/helpers/promise.js";
 import { readAdmittedRunOperatorAuthority } from "../agents/admitted-run-context.js";
 import { getEmbeddedRunAttachment } from "../agents/embedded-agent-runner/run-state.js";
 import { createAttemptNestedToolActivityState } from "../agents/embedded-agent-runner/run/attempt-nested-tool-activity.js";
@@ -28,7 +32,6 @@ import { getAgentRunContext } from "../infra/agent-run-registry.js";
 import { createDiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
 import { rawDataToString } from "../infra/ws.js";
 import { createDiagnosticEmbeddedRunOwner } from "../logging/diagnostic-run-activity.js";
-import { diagnosticLogger } from "../logging/diagnostic-runtime.js";
 import { getSessionControllerOperation } from "../sessions/session-controller.js";
 import * as messageInjection from "../sessions/session-controller.message-injection.js";
 import { closeSkillsWatchers } from "../skills/runtime/refresh.js";
@@ -60,13 +63,6 @@ const browserOrigin = "https://steering.example.test";
 const gatewayToken = "synthetic-steering-gateway-token";
 let harness: Awaited<ReturnType<typeof startServerWithClient>>;
 let kernel: Awaited<ReturnType<(typeof import("./server-kernel.js"))["createGatewayKernel"]>>;
-
-type AgentResponse = {
-  type: string;
-  id: string;
-  ok: boolean;
-  payload?: { status?: string };
-};
 
 installGatewayTestHooks({
   scope: "suite",
@@ -313,10 +309,7 @@ it.for([
     }
     const accepted =
       source === "browser"
-        ? onceMessage<AgentResponse>(
-            harness.ws,
-            (frame) => frame.type === "res" && frame.id === requestId,
-          )
+        ? onceMessage(harness.ws, (frame) => frame.type === "res" && frame.id === requestId)
         : undefined;
     const original =
       source === "browser"
@@ -356,21 +349,16 @@ it.for([
     }
     const capture = vi.spyOn(messageInjection, "captureCurrentReplyMessageInjectionTarget");
     onTestFinished(() => capture.mockRestore());
-    const diagnostics = vi.spyOn(diagnosticLogger, "info");
-    onTestFinished(() => diagnostics.mockRestore());
     try {
       if (accepted) {
         expect(await accepted).toMatchObject({ ok: true, payload: { status: "accepted" } });
       }
       const { attempt, handle } = await withinTest(
-        Promise.race([
+        awaitGateBeforeSettlement(
           Promise.all([ownerReady.promise, startCommitted.promise]).then(([owner]) => owner),
-          original.then((response) => {
-            throw new Error(
-              `Direct command finished before its steering owner and lifecycle start were ready: ${JSON.stringify(response)}`,
-            );
-          }),
-        ]),
+          original,
+          "Direct command finished before steering ownership and lifecycle start",
+        ),
         signal,
       );
       const registration = getEmbeddedRunAttachment(handle);
@@ -396,20 +384,13 @@ it.for([
         idempotencyKey: `browser-direct-command-correction-${source}`,
         queueMode: "steer",
       });
-      expect(response.ok, JSON.stringify({ response, diagnostics: diagnostics.mock.calls })).toBe(
-        true,
-      );
+      expect(response.ok).toBe(true);
       expect(
         capture.mock.results.find(
           (result) => result.type === "return" && result.value?.runId === runId,
         )?.value,
       ).toMatchObject({ runId, sourceTurnId: runId });
-      expect(
-        await withinTest(disposition.promise, signal),
-        JSON.stringify(
-          diagnostics.mock.calls.filter(([message]) => message.startsWith("direct steering")),
-        ),
-      ).toBe(expectedDisposition);
+      expect(await withinTest(disposition.promise, signal)).toBe(expectedDisposition);
       if (expectedDisposition === "steered") {
         expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
       }
@@ -421,13 +402,7 @@ it.for([
           : originalSettled;
       releaseModel.resolve();
       const outcomes = await settled;
-      expect
-        .soft(
-          outcomes.flatMap((outcome) =>
-            outcome.status === "rejected" ? [String(outcome.reason)] : [],
-          ),
-        )
-        .toEqual([]);
+      expect.soft(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([]);
     }
   },
 );
