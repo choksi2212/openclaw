@@ -30,13 +30,10 @@ const remotePlugin = {
   categories: ["channels"],
   runtimeId: "whatsapp",
 };
-const whatsappSkill = {
-  slug: "whatsapp",
-  installRef: "@openclaw/whatsapp",
-  ownerHandle: "openclaw",
-  displayName: "WhatsApp",
-  official: false,
-};
+function skill(displayName: string, ownerHandle: string, official = false) {
+  const slug = displayName.toLowerCase();
+  return { slug, installRef: `@${ownerHandle}/${slug}`, ownerHandle, displayName, official };
+}
 
 async function search(clawhub: Record<string, unknown>, message?: string, workspaceDir?: string) {
   setRuntimeConfigSnapshot({});
@@ -68,7 +65,7 @@ it.each([undefined, "", " \t\n"])(
   "excludes unverified publishers and gives a visible no-match outcome for message=%j",
   async (message) => {
     registry.plugins.mockResolvedValue({ items: [{ ...remotePlugin, isOfficial: false }] });
-    registry.skills.mockResolvedValue([whatsappSkill]);
+    registry.skills.mockResolvedValue([skill("WhatsApp", "openclaw")]);
     const { result, reply, recommendations } = await search({ query: "whatsapp" }, message);
     expect(recommendations).toEqual([]);
     expect(reply?.text).toContain("No official ClawHub plugin or skill match");
@@ -87,16 +84,7 @@ it("preserves an explicit reply when a ClawHub search has no matches", async () 
   expectNotice(result, "No official ClawHub skill match");
 });
 it("matches an official skill to its exact linked publisher instead of its display name", async () => {
-  registry.skills.mockResolvedValue([
-    {
-      slug: "calendar",
-      installRef: "@verified/calendar",
-      ownerHandle: "verified",
-      displayName: "Calendar",
-      official: true,
-      icon: "📆",
-    },
-  ]);
+  registry.skills.mockResolvedValue([{ ...skill("Calendar", "verified", true), icon: "📆" }]);
   registry.skillStatus.mockReturnValue({
     skills: [
       {
@@ -116,14 +104,14 @@ it("matches an official skill to its exact linked publisher instead of its displ
     "/workspace",
   );
   expect(reply?.text).toBe(message);
-  expect(recommendations).toEqual([
-    expect.objectContaining({
+  expect(recommendations).toMatchObject([
+    {
       kind: "skill",
       id: "@verified/calendar",
       skillRef: "@verified/calendar",
       installed: false,
       official: true,
-    }),
+    },
   ]);
   expectNotice(result, "Calendar: Available to install.");
 });

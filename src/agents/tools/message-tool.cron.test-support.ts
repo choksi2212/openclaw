@@ -4,25 +4,15 @@ import { CronService } from "../../cron/service.js";
 import { saveCronStore } from "../../cron/store.js";
 import { makeCronReceiptJob } from "../../cron/store/run-receipt-store.test-support.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
-import type { AdmittedRunContext } from "../admitted-run-context.js";
 import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
 import { createEmbeddedMessageInvocationPolicy } from "../scheduled-message-invocation.js";
 import { createMessageTool } from "./message-tool-execution.js";
 
 type CronMessageRun = {
-  admitted: AdmittedRunContext;
-  messageActionTurnCapability: string;
-  runId: string;
-  sessionId: string;
-  sessionKey: string;
-  createTool: (
-    options?: NonNullable<Parameters<typeof createMessageTool>[0]>,
-  ) => ReturnType<typeof createMessageTool>;
-  revokeMessage: () => Promise<unknown>;
+  createTool: typeof createMessageTool;
   closeAdmission: () => void;
 };
 
-/** Use real reservation, activation, message admission and completion owners without a Gateway boot. */
 export async function withCronMessageRun<T>(
   params: { cfg: OpenClawConfig; storePath: string; sessionKey: string; sessionId: string },
   run: (owner: CronMessageRun) => Promise<T>,
@@ -33,16 +23,14 @@ export async function withCronMessageRun<T>(
   const scope = { ...identity, sessionKey, scheduledToolPolicy };
   const job = {
     ...makeCronReceiptJob("message-entrypoint", "main"),
-    payload: {
-      kind: "agentTurn" as const,
-      message: "synthetic entrypoint proof",
-      toolsAllow: ["message"],
-    },
+    payload: { kind: "agentTurn" as const, message: "proof", toolsAllow: ["message"] },
     delivery: { mode: "none" as const },
     scheduledToolPolicy,
   };
   await saveCronStore(storePath, { version: 1, jobs: [job] });
-  const result: { outcome?: { ok: true; value: T } | { ok: false; error: unknown } } = {};
+  let unwrap = (): T => {
+    throw new Error("Cron did not enter its isolated runner");
+  };
   const cron = new CronService({
     storePath,
     scheduler: createTestGatewayScheduler(),
@@ -52,7 +40,7 @@ export async function withCronMessageRun<T>(
     enqueueSystemEvent() {},
     requestHeartbeat() {},
     runIsolatedAgentJob: async (execution) => {
-      const admission = prepareCronRunAdmission({
+      const { preparedRunAdmission, messageActionTurnCapability, close } = prepareCronRunAdmission({
         ...scope,
         cfg,
         jobId: job.id,
@@ -62,8 +50,7 @@ export async function withCronMessageRun<T>(
         toolsAllow: ["message"],
       });
       try {
-        const admitted = await admission.preparedRunAdmission.admit("embedded");
-        const messageActionTurnCapability = admission.messageActionTurnCapability;
+        await preparedRunAdmission.admit("embedded");
         if (!messageActionTurnCapability) {
           throw new Error("Cron did not publish its message capability");
         }
@@ -78,11 +65,6 @@ export async function withCronMessageRun<T>(
           isAvailable: () => catalog.some((tool) => tool.name === "message"),
         });
         const value = await run({
-          admitted,
-          messageActionTurnCapability,
-          runId: identity.runId,
-          sessionId,
-          sessionKey,
           createTool(options = {}) {
             const tool = createMessageTool({
               ...options,
@@ -96,30 +78,23 @@ export async function withCronMessageRun<T>(
             catalog.push(tool);
             return tool;
           },
-          revokeMessage: () =>
-            cron.update(job.id, { payload: { kind: "agentTurn", toolsAllow: ["read"] } }),
-          closeAdmission: () => admission.close(),
+          closeAdmission: close,
         });
-        result.outcome = { ok: true, value };
+        unwrap = () => value;
         return { status: "ok" };
       } catch (error) {
-        result.outcome = { ok: false, error };
+        unwrap = () => {
+          throw error;
+        };
         return { status: "error", error: String(error) };
       } finally {
-        admission.close();
+        close();
       }
     },
   });
   try {
     await cron.run(job.id, "force");
-    const outcome = result.outcome;
-    if (!outcome) {
-      throw new Error("Cron did not enter its isolated runner");
-    }
-    if (!outcome.ok) {
-      throw outcome.error;
-    }
-    return outcome.value;
+    return unwrap();
   } finally {
     cron.stop();
     await cron.waitForIdle();

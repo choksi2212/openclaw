@@ -60,11 +60,7 @@ describe.runIf(process.platform === "win32")("host-local media tool file URLs", 
         const pdfPath = path.join(workspaceDir, "résumé document.pdf");
         await fs.writeFile(imagePath, ONE_PIXEL_PNG);
         await fs.writeFile(pdfPath, FAKE_PDF_MEDIA.buffer);
-        await stubPdfToolInfra(agentDir, {
-          mockLoad: false,
-          provider: "anthropic",
-          input: ["text", "document"],
-        });
+        await stubPdfToolInfra(agentDir, { mockLoad: false });
         vi.spyOn(pdfNativeProviders, "anthropicAnalyzePdf").mockResolvedValue("native summary");
 
         const config: OpenClawConfig = {
@@ -102,24 +98,19 @@ describe.runIf(process.platform === "win32")("host-local media tool file URLs", 
         expect(pdfResult.content).toEqual([{ type: "text", text: "native summary" }]);
         expect(pdfResult.details).toMatchObject({ pdf: pdfPath, native: true });
 
-        const providers = [
-          {
-            id: "fixture",
-            defaultModel: "edit",
-            models: ["edit"],
-            isConfigured: () => true,
-            capabilities: {
-              generate: { maxCount: 1 },
-              edit: { enabled: true, maxInputImages: 1 },
-              geometry: {},
-            },
-            generateImage: vi.fn(async () => {
-              throw new Error("runtime generateImage spy should own the call");
-            }),
-          },
-        ];
         vi.spyOn(mediaProviders, "acquireMediaGenerationToolProviders").mockResolvedValue({
-          providers,
+          providers: [
+            {
+              id: "fixture",
+              capabilities: {
+                generate: {},
+                edit: { enabled: true, maxInputImages: 1 },
+              },
+              generateImage: async () => {
+                throw new Error("runtime generateImage spy should own the call");
+              },
+            },
+          ],
           assertOpen() {},
           run: async (run) => await run(),
           release: async () => {},
