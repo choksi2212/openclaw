@@ -183,6 +183,25 @@ describe("SQLite auth storage", () => {
     });
   });
 
+  it("keeps native login available without exposing its marker as an HTTP credential", async () => {
+    const storage = PublicAuthStorage.inMemory({
+      fixture: {
+        type: "api_key",
+        key: "synthetic-native-presence",
+        nativeAuth: { runtime: "native-fixture", mode: "oauth" },
+      },
+    });
+
+    expect(storage.hasAuth("fixture")).toBe(true);
+    await expect(storage.getApiKey("fixture")).rejects.toMatchObject({
+      code: "missing-provider-auth",
+      provider: "fixture",
+    });
+
+    storage.setRuntimeApiKey("fixture", "synthetic-explicit-api-key");
+    await expect(storage.getApiKey("fixture")).resolves.toBe("synthetic-explicit-api-key");
+  });
+
   it("dispatches callback-based login to the owning provider plugin", async () => {
     const storage = await AuthStorage.forAgentAsync(agentDir);
     const callbacks = loginCallbacks();
