@@ -22,13 +22,11 @@ export type ClawAddApplyResult = {
   error?: { code: string; message: string };
 };
 
-function isOfficialEntry(entry: ClawCatalogEntry): boolean {
-  return (
-    entry.official && entry.channel === "official" && entry.packageName.startsWith("@openclaw/")
-  );
+function isPublicEntry(entry: ClawCatalogEntry): boolean {
+  return entry.channel === "official" || entry.channel === "community";
 }
 
-export async function searchOfficialClaws(
+export async function searchClaws(
   client: GatewayBrowserClient,
   query: string,
   limit?: number,
@@ -38,10 +36,10 @@ export async function searchOfficialClaws(
     ...(trimmed ? { query: trimmed } : {}),
     ...(limit ? { limit } : {}),
   });
-  return result.entries.filter(isOfficialEntry);
+  return result.entries.filter(isPublicEntry);
 }
 
-export async function readOfficialClawDetail(
+export async function readClawDetail(
   client: GatewayBrowserClient,
   source: ClawCatalogSource,
 ): Promise<ClawCatalogDetail> {
@@ -50,13 +48,22 @@ export async function readOfficialClawDetail(
     source,
   );
   const detail = result.detail;
-  if (!isOfficialEntry(detail)) {
+  if (
+    !isPublicEntry(detail) ||
+    detail.packageName !== source.packageName ||
+    detail.version !== source.version ||
+    !detail.contents ||
+    !Array.isArray(detail.contents.instructions) ||
+    !Array.isArray(detail.contents.skills) ||
+    !Array.isArray(detail.contents.integrations) ||
+    !Array.isArray(detail.contents.automations)
+  ) {
     throw new Error("ClawHub did not return the contents of this Claw release.");
   }
   return detail;
 }
 
-export async function readOfficialClawPreview(
+export async function readClawPreview(
   client: GatewayBrowserClient,
   source: ClawCatalogSource,
   request: Pick<ClawHubClawCatalogPreview, "kind" | "name">,
@@ -68,7 +75,7 @@ export async function readOfficialClawPreview(
   return result.preview;
 }
 
-export async function readOfficialClawAddReviewPlan(
+export async function readClawAddReviewPlan(
   client: GatewayBrowserClient,
   source: ClawCatalogSource,
 ): Promise<ClawAddReviewPlan> {
@@ -79,7 +86,7 @@ export async function readOfficialClawAddReviewPlan(
   return plan;
 }
 
-export async function applyOfficialClawAdd(
+export async function applyClawAdd(
   client: GatewayBrowserClient,
   source: ClawCatalogSource,
   options: {
