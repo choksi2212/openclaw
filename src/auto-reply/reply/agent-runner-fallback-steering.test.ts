@@ -94,13 +94,15 @@ describe("ordinary steering into automatic model fallback", () => {
       await operation.bindToolAuthorityRouteAsync(run.run);
       const injected = vi.fn(async () => {});
       const replacementInjected = vi.fn(async () => {});
-      if (!holdBackend) {
+      const attach = (queueMessage: () => Promise<void>) =>
         operation.attachBackend({
           kind: "embedded",
           terminalReplyExpectation: "result-required",
           cancel() {},
-          messageInjectionV2: { version: 2, isAvailable: () => true, queueMessage: injected },
+          messageInjectionV2: { version: 2, isAvailable: () => true, queueMessage },
         });
+      if (!holdBackend) {
+        attach(injected);
       }
       operation.setPhase("running");
       const entered = createDeferred();
@@ -114,9 +116,7 @@ describe("ordinary steering into automatic model fallback", () => {
         });
       }
       const delivered = createDeferred<FollowupRun>();
-      const consumeFollowup = vi.fn(async (queued: FollowupRun) => {
-        delivered.resolve(queued);
-      });
+      const consumeFollowup = vi.fn(async (queued: FollowupRun) => delivered.resolve(queued));
       vi.spyOn(followupRunner, "createFollowupRunner").mockReturnValue(async (queued) => {
         // Follow-up admission owns execution ordering after a parked input settles.
         const admission = await admitReplyTurn({
@@ -158,16 +158,7 @@ describe("ordinary steering into automatic model fallback", () => {
       try {
         await awaitGateBeforeSettlement(entered.promise, incoming, "Preparation was not held");
         if (replaceBackend) {
-          operation.attachBackend({
-            kind: "embedded",
-            terminalReplyExpectation: "result-required",
-            cancel() {},
-            messageInjectionV2: {
-              version: 2,
-              isAvailable: () => true,
-              queueMessage: replacementInjected,
-            },
-          });
+          attach(replacementInjected);
         } else if (aborted) {
           expect(operation.abortByUser()).toBe(true);
         } else {
