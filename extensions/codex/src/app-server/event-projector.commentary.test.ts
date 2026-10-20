@@ -1,3 +1,4 @@
+import { finalMessage as finalItem } from "./event-projector.compact.test-support.js";
 import * as fixture from "./event-projector.compact.test-support.js";
 import {
   describe,
@@ -17,6 +18,7 @@ import {
   type ProjectorNotification,
 } from "./event-projector.test-harness.js";
 import { prepareCodexServerNotification } from "./protocol-validators.js";
+import { readMirrorIdentity } from "./upstream-prompt-provenance.js";
 
 registerCodexEventProjectorTestLifecycle();
 
@@ -24,13 +26,12 @@ function commentaryItem(id: string, text = "") {
   return fixture.message(id, text, "commentary");
 }
 
-describe("CodexAppServerEventProjector commentary projection", () => {
+describe("CodexAppServerEventProjector text and guardian projection", () => {
   it("keeps intermediate agentMessage items out of the final visible reply", async () => {
     const { onAssistantMessageStart, onPartialReply, projector } =
       await createProjectorWithAssistantHooks();
-    const draft = "checking thread context; then post a tight progress reply here.";
-    const answer =
-      "release fixes first. please drop affected PRs, failing checks, and blockers here.";
+    const draft = "checking thread context";
+    const answer = "Final answer.";
 
     await fixture.delta(projector, draft, "msg-commentary");
     await fixture.delta(projector, answer, "msg-final");
@@ -42,8 +43,7 @@ describe("CodexAppServerEventProjector commentary projection", () => {
     const result = fixture.result(projector);
 
     expect(onAssistantMessageStart).toHaveBeenCalledTimes(1);
-    // Phase-less snapshots stay on the replaceable agent-event path so legacy
-    // append-only channel previews do not render superseded coordination text.
+    // Unphased previews must remain replaceable, not append-only channel replies.
     expect(onPartialReply).not.toHaveBeenCalled();
     expect(result.assistantTexts).toEqual([answer]);
     expect(result.lastAssistant?.content).toEqual(fixture.text(answer));
@@ -120,25 +120,9 @@ describe("CodexAppServerEventProjector commentary projection", () => {
   it.each(["started", "completed"])(
     "hands off formatted commentary identified at item/%s",
     async (phaseKnownAt) => {
-      const onAgentEvent = vi.fn();
-      const onPartialReply = vi.fn();
-      const commentaryText = [
-        "Checking the app-server stream",
-        "",
-        "| Intent | Command |",
-        "| --- | --- |",
-        "| Session only | `/model opus` |",
-        "",
-        "```text",
-        "BEFORE  /model opus  → persistent",
-        "AFTER   /model opus  → session only",
-        "```",
-      ].join("\n");
-      const projector = await createProjector({
-        ...(await createParams()),
-        onAgentEvent,
-        onPartialReply,
-      });
+      const { projector, onAgentEvent, onPartialReply } = await fixture.observePartial();
+      const commentaryText =
+        "Checking\n\n| Intent | Command |\n| --- | --- |\n| Session | `/model` |\n\n```text\nBEFORE → persistent\nAFTER → session\n```";
 
       await fixture.start(
         projector,
@@ -154,8 +138,7 @@ describe("CodexAppServerEventProjector commentary projection", () => {
           data: { itemId: "msg-commentary", text: commentaryText },
         });
       }
-      // The completion boundary lets channels buffer their first notification;
-      // text-only dedupe must not erase it after the final identical snapshot.
+      // Identical completion snapshots must not dedupe the first buffered channel notification.
       await fixture.complete(projector, commentaryItem("msg-commentary", commentaryText));
       if (phaseKnownAt === "completed") {
         expect(
@@ -175,7 +158,7 @@ describe("CodexAppServerEventProjector commentary projection", () => {
         ]);
       }
       await fixture.finish(projector, [
-        fixture.message("msg-final", "final answer", "final_answer"),
+        finalItem("msg-final", "final answer"),
         commentaryItem("msg-commentary", commentaryText),
       ]);
 
@@ -228,7 +211,7 @@ describe("CodexAppServerEventProjector commentary projection", () => {
 
     await fixture.finish(projector, [
       commentaryItem("msg-commentary", "Checking the workspace"),
-      fixture.message("msg-final", "Done", "final_answer"),
+      finalItem("msg-final", "Done"),
     ]);
 
     const result = fixture.result(projector);
@@ -262,18 +245,13 @@ describe("CodexAppServerEventProjector commentary projection", () => {
     await fixture.finish(projector, [
       commentaryItem("msg-before-tool", "Before the tool"),
       commentaryItem("msg-after-tool", "After the tool"),
-      fixture.message("msg-final", "Done", "final_answer"),
+      finalItem("msg-final", "Done"),
     ]);
 
     const result = fixture.result(projector);
-    const identities = result.messagesSnapshot.flatMap((message) => {
-      const identity = (message as { __openclaw?: { mirrorIdentity?: unknown } })["__openclaw"]
-        ?.mirrorIdentity;
-      return typeof identity === "string" &&
-        (identity.includes(":commentary:") || identity.includes(":tool:"))
-        ? [identity]
-        : [];
-    });
+    const identities = result.messagesSnapshot
+      .map(readMirrorIdentity)
+      .filter((identity) => identity?.includes(":commentary:") || identity?.includes(":tool:"));
     expect(identities).toEqual([
       `${TURN_ID}:commentary:msg-before-tool`,
       `${TURN_ID}:tool:call-search:call`,
@@ -294,8 +272,7 @@ describe("CodexAppServerEventProjector commentary projection", () => {
 
     const preambles = fixture.events(onAgentEvent, "item", "preamble");
 
-    expect(preambles.map((event) => event.data.progressText)).toEqual([]);
-    expect(preambles.every((event) => event.data.itemId === "msg-commentary")).toBe(true);
+    expect(preambles).toEqual([]);
 
     await fixture.rawAssistant(projector, "Later raw-only note", { phase: "commentary" });
     await fixture.finish(projector, []);
@@ -308,17 +285,19 @@ describe("CodexAppServerEventProjector commentary projection", () => {
         .map((message) => message.content),
     ).toEqual([fixture.text("Later raw-only note")]);
   });
-});
-
-describe("CodexAppServerEventProjector reasoning and guardian projection", () => {
-  function guardianWarning(message: string, threadId = THREAD_ID): ProjectorNotification {
-    return prepareCodexServerNotification({
+  const guardianWarning = (message: string) =>
+    prepareCodexServerNotification({
       method: "guardianWarning",
-      params: { threadId, message },
+      params: { threadId: THREAD_ID, message },
     });
-  }
 
-  function guardianReview(params: {
+  function guardianReview({
+    id,
+    target = "cmd-1",
+    phase = "completed",
+    action,
+    ...review
+  }: {
     id: string;
     status: string;
     target?: string | null;
@@ -328,18 +307,12 @@ describe("CodexAppServerEventProjector reasoning and guardian projection", () =>
     rationale?: string | null;
     action?: Record<string, unknown>;
   }): ProjectorNotification {
-    const phase = params.phase ?? "completed";
     return forCurrentTurn(`item/autoApprovalReview/${phase}`, {
-      reviewId: params.id,
-      targetItemId: params.target === undefined ? "cmd-1" : params.target,
+      reviewId: id,
+      targetItemId: target,
       ...(phase === "completed" ? { decisionSource: "agent" } : {}),
-      review: {
-        status: params.status,
-        ...(params.riskLevel ? { riskLevel: params.riskLevel } : {}),
-        ...(params.userAuthorization ? { userAuthorization: params.userAuthorization } : {}),
-        ...(params.rationale !== undefined ? { rationale: params.rationale } : {}),
-      },
-      action: params.action ?? {
+      review,
+      action: action ?? {
         type: "execve",
         source: "shell",
         program: "/bin/printf",
@@ -619,34 +592,26 @@ describe("CodexAppServerEventProjector reasoning and guardian projection", () =>
   });
 });
 
-describe("CodexAppServerEventProjector started text", () => {
-  it("includes started-item text in the final_answer stream before subsequent deltas", async () => {
-    const onAgentEvent = vi.fn();
-    const onPartialReply = vi.fn();
-    const projector = await createProjector({
-      ...(await createParams()),
-      onAgentEvent,
-      onPartialReply,
-    });
+it("includes started-item text in the final_answer stream before subsequent deltas", async () => {
+  const { projector, onAgentEvent, onPartialReply } = await fixture.observePartial();
 
-    await fixture.start(projector, fixture.message("msg-1", "Hello ", "final_answer"));
-    expect(onAgentEvent).toHaveBeenCalledWith({
-      stream: "assistant",
-      data: expect.objectContaining({ text: "Hello ", delta: "Hello " }),
-    });
-
-    await fixture.delta(projector, "world");
-    await fixture.start(projector, fixture.message("msg-1", "Hello ", "final_answer"));
-    await fixture.delta(projector, "!");
-
-    expect(onAgentEvent).toHaveBeenCalledWith({
-      stream: "assistant",
-      data: expect.objectContaining({ text: "Hello world!", delta: "!" }),
-    });
-    expect(onPartialReply.mock.calls.map(([payload]) => payload)).toEqual([
-      { text: "Hello ", delta: "Hello " },
-      { text: "Hello world", delta: "world" },
-      { text: "Hello world!", delta: "!" },
-    ]);
+  await fixture.start(projector, finalItem("msg-1", "Hello "));
+  expect(onAgentEvent).toHaveBeenCalledWith({
+    stream: "assistant",
+    data: expect.objectContaining({ text: "Hello ", delta: "Hello " }),
   });
+
+  await fixture.delta(projector, "world");
+  await fixture.start(projector, finalItem("msg-1", "Hello "));
+  await fixture.delta(projector, "!");
+
+  expect(onAgentEvent).toHaveBeenCalledWith({
+    stream: "assistant",
+    data: expect.objectContaining({ text: "Hello world!", delta: "!" }),
+  });
+  expect(onPartialReply.mock.calls.map(([payload]) => payload)).toEqual([
+    { text: "Hello ", delta: "Hello " },
+    { text: "Hello world", delta: "world" },
+    { text: "Hello world!", delta: "!" },
+  ]);
 });

@@ -25,6 +25,10 @@ export function message(id: string, value = "", phase?: string) {
   return { type: "agentMessage", id, text: value, ...(phase === undefined ? {} : { phase }) };
 }
 
+export function finalMessage(id: string, value = "") {
+  return message(id, value, "final_answer");
+}
+
 export function text(value: string) {
   return [{ type: "text" as const, text: value }];
 }
@@ -83,4 +87,15 @@ export async function observe() {
         .map((event) => event.data);
     },
   };
+}
+
+export async function observePartial() {
+  const onAgentEvent = vi.fn();
+  const onPartialReply = vi.fn();
+  const projector = await createProjector({
+    ...(await createParams()),
+    onAgentEvent,
+    onPartialReply,
+  });
+  return { projector, onAgentEvent, onPartialReply };
 }

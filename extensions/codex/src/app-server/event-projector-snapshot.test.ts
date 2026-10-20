@@ -6,6 +6,7 @@ import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it } from "vitest";
 import { createNativeCommandItem } from "./event-projector-command.test-support.js";
 import { buildCodexMessagesSnapshot } from "./event-projector-snapshot.js";
+import { finalMessage as finalItem } from "./event-projector.compact.test-support.js";
 import * as fixture from "./event-projector.compact.test-support.js";
 import {
   buildEmptyToolTelemetry,
@@ -77,21 +78,18 @@ describe("buildCodexMessagesSnapshot", () => {
     "captures only visible assistant items at the first steer (%s)",
     async (replacement) => {
       const projector = await createProjector();
-      await fixture.start(projector, fixture.message("preview", "", "final_answer"));
+      await fixture.start(projector, finalItem("preview", ""));
       await fixture.delta(
         projector,
         replacement === "completed replacement" ? "Authoritative" : "First preview",
         "preview",
       );
       if (replacement === "cumulative replacement" || replacement === "append-only streams") {
-        await fixture.start(projector, fixture.message("second-preview", "", "final_answer"));
+        await fixture.start(projector, finalItem("second-preview", ""));
         await fixture.delta(projector, "Second preview", "second-preview");
       }
       if (replacement === "completed replacement") {
-        await fixture.complete(
-          projector,
-          fixture.message("replacement", "Authoritative answer", "final_answer"),
-        );
+        await fixture.complete(projector, finalItem("replacement", "Authoritative answer"));
       } else if (replacement !== "append-only streams") {
         await fixture.start(projector, fixture.message("replacement", ""));
         await fixture.delta(projector, "Authoritative answer", "replacement");
@@ -110,7 +108,7 @@ describe("buildCodexMessagesSnapshot", () => {
 
   it("keeps newly streamed text after tools observed since its assistant item started", async () => {
     const projector = await createProjector();
-    await fixture.start(projector, fixture.message("early-start", "", "final_answer"));
+    await fixture.start(projector, finalItem("early-start", ""));
     const tool = createNativeCommandItem({
       id: "earlier-tool",
       aggregatedOutput: "Tool completed",
@@ -130,10 +128,7 @@ describe("buildCodexMessagesSnapshot", () => {
 
   it("keeps a persisted earlier answer separate from a later tool-authored reply", async () => {
     const projector = await createProjector();
-    await fixture.complete(
-      projector,
-      fixture.message("earlier-answer", "Earlier answer.", "final_answer"),
-    );
+    await fixture.complete(projector, finalItem("earlier-answer", "Earlier answer."));
     const prefix = projector.buildSteeringTranscriptPrefix();
     commitSteeringPrefix(projector, prefix);
 
@@ -161,16 +156,14 @@ describe("buildCodexMessagesSnapshot", () => {
   it("adopts the saved prefix for a raw completion with a replacement identity", async () => {
     const completionId = "raw-completed";
     const projector = await createProjector();
-    await fixture.start(projector, fixture.message("streamed", "", "final_answer"));
+    await fixture.start(projector, finalItem("streamed", ""));
     await fixture.delta(projector, "Before steer.", "streamed");
     commitSteeringPrefix(projector, projector.buildSteeringTranscriptPrefix());
     await fixture.rawAssistant(projector, "Before steer. After steer.", {
       id: completionId,
       phase: "final_answer",
     });
-    await fixture.finish(projector, [
-      fixture.message(completionId, "Before steer. After steer.", "final_answer"),
-    ]);
+    await fixture.finish(projector, [finalItem(completionId, "Before steer. After steer.")]);
     expect(fixture.result(projector).assistantTexts).toEqual([" After steer."]);
   });
 
@@ -178,7 +171,7 @@ describe("buildCodexMessagesSnapshot", () => {
     "respects the first completion boundary across a native tool (completed before tool: %s)",
     async (completedBeforeTool) => {
       const projector = await createProjector();
-      const started = fixture.message("split-answer", "", "final_answer");
+      const started = finalItem("split-answer", "");
       await fixture.start(projector, started);
       await fixture.delta(projector, "Before steer.", started.id);
       commitSteeringPrefix(projector, projector.buildSteeringTranscriptPrefix());
@@ -203,11 +196,11 @@ describe("buildCodexMessagesSnapshot", () => {
   it("retains distinct completed item identities across steers without replaying the terminal answer", async () => {
     const projector = await createProjector();
     for (const id of ["answer-a", "answer-b"]) {
-      await fixture.complete(projector, fixture.message(id, "Same answer.", "final_answer"));
+      await fixture.complete(projector, finalItem(id, "Same answer."));
     }
     const sleep = { type: "sleep", id: "sleep", durationMs: 250 };
     await fixture.start(projector, sleep);
-    const pending = fixture.message("pending", "", "final_answer");
+    const pending = finalItem("pending", "");
     await fixture.start(projector, pending);
     await fixture.delta(projector, "Still writing.", pending.id);
 
@@ -244,7 +237,7 @@ describe("buildCodexMessagesSnapshot", () => {
     "retains the captured raw cutoff when %s completion arrives before the mirror settles",
     async (identity) => {
       const projector = await createProjector();
-      const started = fixture.message("streamed", "", "final_answer");
+      const started = finalItem("streamed", "");
       const beforeSteer = " \t🦞 prefix\n";
       await fixture.start(projector, started);
       await fixture.delta(projector, beforeSteer, started.id);

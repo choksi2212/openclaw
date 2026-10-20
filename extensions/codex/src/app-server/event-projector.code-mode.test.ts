@@ -1,19 +1,21 @@
+import * as fixture from "./event-projector.compact.test-support.js";
 import {
   describe,
   registerCodexEventProjectorTestLifecycle,
   expect,
   it,
   createProjector,
-  buildEmptyToolTelemetry,
-  forCurrentTurn,
 } from "./event-projector.test-harness.js";
 
-function notify(
-  projector: Awaited<ReturnType<typeof createProjector>>,
-  method: Parameters<typeof forCurrentTurn>[0],
-  params: Record<string, unknown>,
-) {
-  return projector.handleNotification(forCurrentTurn(method, params));
+function execOutput(callId: string, error: string) {
+  return {
+    type: "custom_tool_call_output",
+    call_id: callId,
+    output: ["Script failed\nWall time 6.0 seconds\nOutput:\n", error].map((text) => ({
+      type: "input_text",
+      text,
+    })),
+  };
 }
 
 registerCodexEventProjectorTestLifecycle();
@@ -26,7 +28,7 @@ describe("Codex Code Mode transcript projection", () => {
     const patchInput =
       "*** Begin Patch\n*** Add File: runtime-tool-fixture-patch.txt\n+runtime patch\n*** End Patch\n";
 
-    await notify(projector, "rawResponseItem/completed", {
+    await fixture.notify(projector, "rawResponseItem/completed", {
       item: {
         type: "custom_tool_call",
         call_id: outerCallId,
@@ -34,32 +36,17 @@ describe("Codex Code Mode transcript projection", () => {
         input: `const result = await tools.apply_patch(${JSON.stringify(patchInput)});\ntext(result);\n`,
       },
     });
-    await notify(projector, "item/completed", {
-      item: {
-        type: "fileChange",
-        id: nativeCallId,
-        changes: [{ path: "runtime-tool-fixture-patch.txt", kind: { type: "add" } }],
-        status: "failed",
-      },
+    await fixture.complete(projector, {
+      type: "fileChange",
+      id: nativeCallId,
+      changes: [{ path: "runtime-tool-fixture-patch.txt", kind: { type: "add" } }],
+      status: "failed",
     });
-    await notify(projector, "rawResponseItem/completed", {
-      item: {
-        type: "custom_tool_call_output",
-        call_id: outerCallId,
-        output: [
-          {
-            type: "input_text",
-            text: "Script failed\nWall time 6.0 seconds\nOutput:\n",
-          },
-          {
-            type: "input_text",
-            text: "Script error: patch failed",
-          },
-        ],
-      },
+    await fixture.notify(projector, "rawResponseItem/completed", {
+      item: execOutput(outerCallId, "Script error: patch failed"),
     });
 
-    const result = projector.buildResult(buildEmptyToolTelemetry());
+    const result = fixture.result(projector);
     const patchCalls = result.messagesSnapshot.flatMap((message) => {
       if (message.role !== "assistant" || !Array.isArray(message.content)) {
         return [];
@@ -104,24 +91,17 @@ describe("Codex Code Mode transcript projection", () => {
     const projector = await createProjector();
     const callId = "not-an-isolated-code-mode-patch";
 
-    await notify(projector, "rawResponseItem/completed", {
+    await fixture.notify(projector, "rawResponseItem/completed", {
       item: { type: "custom_tool_call", call_id: callId, name: "exec", input: source },
     });
-    await notify(projector, "rawResponseItem/completed", {
-      item: {
-        type: "custom_tool_call_output",
-        call_id: callId,
-        output: [
-          { type: "input_text", text: "Script failed\nWall time 6.0 seconds\nOutput:\n" },
-          {
-            type: "input_text",
-            text: "Script error:\npatch rejected: writing outside of the project; rejected by user approval settings",
-          },
-        ],
-      },
+    await fixture.notify(projector, "rawResponseItem/completed", {
+      item: execOutput(
+        callId,
+        "Script error:\npatch rejected: writing outside of the project; rejected by user approval settings",
+      ),
     });
 
-    const result = projector.buildResult(buildEmptyToolTelemetry());
+    const result = fixture.result(projector);
     expect(result.messagesSnapshot.filter((message) => message.role === "toolResult")).toEqual([
       expect.objectContaining({ toolCallId: callId, toolName: "exec", isError: true }),
     ]);
