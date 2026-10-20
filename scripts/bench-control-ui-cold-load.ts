@@ -47,6 +47,7 @@ import {
   summarizeColdLoadTrace,
   summarizeCpuProfile,
 } from "./lib/control-ui-cold-load-trace.ts";
+import { installWidgetReadiness } from "./lib/control-ui-dashboard-probe.ts";
 import { probeColdLoadOverlays } from "./lib/control-ui-overlay-probe.ts";
 import { warmReloadProbe } from "./lib/control-ui-warm-reload-probe.ts";
 
@@ -64,33 +65,6 @@ function readRigProbeSnapshot() {
       .filter((entry) => /\/api\/users\/[^/]+\/avatar/u.test(new URL(entry.name).pathname))
       .map((entry) => ({ url: entry.name, start: entry.startTime, duration: entry.duration })),
   };
-}
-
-function installWidgetReadiness() {
-  const ready = new Map<string, number>();
-  window.addEventListener("message", (event) => {
-    if (event.data?.method !== "ui/notifications/sandbox-resource-loaded") {
-      return;
-    }
-    for (const [kind, selector] of [
-      ["board", ".board-widget__frame"],
-      ["inline", ".chat-tool-card__preview-frame"],
-    ] as const) {
-      const frames = [...document.querySelectorAll<HTMLIFrameElement>(selector)];
-      const index = frames.findIndex((frame) => frame.contentWindow === event.source);
-      const key = `${kind}:${index}`;
-      if (index >= 0 && !ready.has(key)) {
-        ready.set(key, performance.now());
-      }
-    }
-  });
-  Reflect.set(window, "__readWidgetReadiness", () => ({
-    measurement:
-      "sandbox resource-loaded notification after the widget document load; not a paint timestamp",
-    firstInlineReadyMs: [...ready].find(([key]) => key.startsWith("inline:"))?.[1] ?? null,
-    firstBoardReadyMs: [...ready].find(([key]) => key.startsWith("board:"))?.[1] ?? null,
-    ready: Object.fromEntries(ready),
-  }));
 }
 
 function summarizeResponseTasks(raw: unknown[]) {
@@ -225,6 +199,8 @@ const { values } = parseArgs({
     "cpu-profile-compare": { type: "string" },
     "warm-reload": { type: "boolean", default: false },
     "large-snapshot": { type: "boolean", default: false },
+    "dashboard-widget": { type: "boolean", default: false },
+    "connect-not-before-ms": { type: "string", default: "0" },
     "transcript-messages": { type: "string" },
     "overlay-probe": { type: "boolean", default: false },
     untraced: { type: "boolean", default: false },
@@ -300,6 +276,7 @@ const baselineCpu = values["cpu-profile-compare"]
 const cpuRuns: Record<string, ColdLoadCpuTables[]> = {};
 const runs = Number(values.runs);
 const latencyMs = Number(values["latency-ms"]);
+const connectNotBeforeMs = Number(values["connect-not-before-ms"]);
 const methodLatencyMs: Record<string, number> = {};
 for (const value of values["method-latency-ms"]) {
   const [method, delay, ...extra] = value.split("=");
@@ -350,6 +327,8 @@ if (
   runs > (values["compare-bundle-dir"].length ? 60 : 20) ||
   !Number.isFinite(latencyMs) ||
   latencyMs < 0 ||
+  !Number.isFinite(connectNotBeforeMs) ||
+  connectNotBeforeMs < 0 ||
   !Number.isFinite(frameGapMs) ||
   frameGapMs < 0 ||
   !Number.isFinite(captureMs) ||
@@ -427,7 +406,10 @@ if (!address || typeof address === "string") {
 const fixture = createControlUiTeamScaleFixture({
   now: fixtureNowMs,
   baseUrl: server.baseUrl,
-  sandboxUrl: buildSandboxHostPath({ blockDescendantFrames: true }),
+  sandboxUrl: buildSandboxHostPath({
+    blockDescendantFrames: true,
+    ...(values["dashboard-widget"] ? { resourceDomains: [new URL(server.baseUrl).origin] } : {}),
+  }),
   sandboxPort: address.port,
   liveRun: values["live-events"] || values["streaming-reply"],
   sidebarListChurn: values["sidebar-list-churn"],
@@ -439,6 +421,9 @@ const fixture = createControlUiTeamScaleFixture({
   closedMenuMembers: values["closed-menu-members"],
   largeSnapshot: values["large-snapshot"],
   transcriptMessages,
+  dashboardWidgetFont: values["dashboard-widget"]
+    ? await readFile("ui/public/fonts/space-grotesk-latin.woff2")
+    : undefined,
 });
 const streamingReply = values["streaming-reply"] ? createControlUiStreamingReply() : undefined;
 const extraInitScripts = await Promise.all(
@@ -525,7 +510,15 @@ try {
   ]);
   await page.route("**/__openclaw__/**", (route) => {
     const asset = assets.get(new URL(route.request().url()).pathname);
-    return asset ? route.fulfill({ status: 200, ...asset }) : route.fallback();
+    return asset
+      ? route.fulfill({
+          status: 200,
+          ...(asset.contentType === "font/woff2"
+            ? { headers: { "Access-Control-Allow-Origin": "*" } }
+            : {}),
+          ...asset,
+        })
+      : route.fallback();
   });
   if (values["duplicate-boot-reads"]) {
     await page.route("**/api/chat/media/outgoing/**", (route) => {
@@ -578,7 +571,7 @@ try {
   );
   const warmProbes = values["warm-reload"] ? `\n(${warmReloadProbe.toString()})();` : "";
   await page.addInitScript({
-    content: `;(() => { if (window !== window.top) return; const __name = (fn) => fn; (${installWidgetReadiness.toString()})(); ${createControlUiMockGatewayInitScript(prepared.scenario)}\n${rigProbeScript}\nwindow.__teamScaleSidebarLists = { apply: (mutation) => window.__teamScaleMutate(mutation) }; window.openclawControlUiE2eGateway.setRequestHandler("sessions.list", async ({ params, respond }) => respond(await window.__teamScaleList(params))); window.openclawControlUiE2eGateway.setRequestHandler("cron.list", async ({ params, respond }) => respond(await window.__teamScaleCronList(params)));\n${createColdLoadProbeInitScript({ latencyMs, methodLatencyMs, frameGapMs, events: fixture.events, liveEvents: fixture.liveEvents, liveHistory: fixture.liveHistory, ownerProbes: !cpuProfile && !values["session-event-churn"] })}\n${streamingReply ? createStreamingReplyProbeInitScript() : ""}\n${extraInitScripts.join("\n")}\n${warmProbes} })();`,
+    content: `;(() => { if (window !== window.top) return; const __name = (fn) => fn; (${installWidgetReadiness.toString()})(); ${createControlUiMockGatewayInitScript(prepared.scenario)}\n${rigProbeScript}\nwindow.__teamScaleSidebarLists = { apply: (mutation) => window.__teamScaleMutate(mutation) }; window.openclawControlUiE2eGateway.setRequestHandler("sessions.list", async ({ params, respond }) => respond(await window.__teamScaleList(params))); window.openclawControlUiE2eGateway.setRequestHandler("cron.list", async ({ params, respond }) => respond(await window.__teamScaleCronList(params)));\n${createColdLoadProbeInitScript({ latencyMs, methodLatencyMs, connectNotBeforeMs, frameGapMs, events: fixture.events, liveEvents: fixture.liveEvents, liveHistory: fixture.liveHistory, ownerProbes: !cpuProfile && !values["session-event-churn"] })}\n${streamingReply ? createStreamingReplyProbeInitScript() : ""}\n${extraInitScripts.join("\n")}\n${warmProbes} })();`,
   });
   const url = values["full-uuid-route"]
     ? new URL(
@@ -623,6 +616,12 @@ try {
         await page.waitForFunction(() => {
           const ready = Reflect.get(window, "__readWidgetReadiness")();
           return ready.firstBoardReadyMs !== null;
+        });
+      }
+      if (face === "dashboard" && values["dashboard-widget"]) {
+        await page.waitForFunction(() => {
+          const stages = Reflect.get(window, "__readWidgetReadiness")().dashboardStages;
+          return stages.appReadyMs !== null && stages.fontLoaded;
         });
       }
       await page.waitForFunction(
@@ -684,11 +683,16 @@ try {
     persistColdLoadWarmState,
     warmInput,
   );
+  const warmStates = [warmStorage];
+  const snapshotSaves = [snapshotSave];
   for (let index = 1; index < bundleSlots.length; index++) {
     await restoreColdLoadWarmState(page, warmStorage);
     await selectComparisonBundle(index);
     await page.reload({ waitUntil: "domcontentloaded" });
     await settle();
+    const { storage, ...saved } = await page.evaluate(persistColdLoadWarmState, warmInput);
+    warmStates.push(storage);
+    snapshotSaves.push(saved);
   }
   await selectComparisonBundle(0);
   for (let run = 0; run < runs; run++) {
@@ -718,8 +722,9 @@ try {
       );
       return { ...mapped, summary };
     }
-    await restoreColdLoadWarmState(page, warmStorage);
-    await selectComparisonBundle(run % bundleSlots.length);
+    const bundleIndex = run % bundleSlots.length;
+    await restoreColdLoadWarmState(page, warmStates[bundleIndex]!);
+    await selectComparisonBundle(bundleIndex);
     runTransfer =
       sidebarRowTransfer === "delta" || (sidebarRowTransfer === "interleaved" && run % 2 === 1)
         ? "delta"
@@ -1260,7 +1265,7 @@ try {
       streaming,
       sessionSwitch,
       warmReload,
-      snapshotSave,
+      snapshotSave: snapshotSaves[bundleIndex],
       overlays,
     };
     results.push(result);
@@ -1335,6 +1340,8 @@ try {
           : undefined,
         latencyMs,
         methodLatencyMs,
+        connectNotBeforeMs,
+        dashboardWidget: values["dashboard-widget"],
         face,
         shortRoute: values["short-route"],
         fullUuidRoute: values["full-uuid-route"],

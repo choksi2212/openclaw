@@ -73,6 +73,8 @@ type FixtureOptions = {
   closedMenuMembers?: boolean;
   largeSnapshot?: boolean;
   transcriptMessages?: number;
+  /** Opt into a scripted dashboard with an independently fetched web font. */
+  dashboardWidgetFont?: Buffer;
 };
 
 function widgetHtml(index: number) {
@@ -80,6 +82,24 @@ function widgetHtml(index: number) {
 <style>:root{color-scheme:dark light;font-family:system-ui}body{margin:0;padding:20px}h2{font-size:18px}progress{width:100%}</style></head>
 <body><h2>Team metric ${index + 1}</h2><p>Synthetic completed work: ${60 + index}%</p>
 <progress value="${60 + index}" max="100"></progress><p>All fixture systems are available.</p></body></html>`;
+}
+
+function dashboardWidgetHtml(fontUrl: string) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Team metric 1</title>
+<style>
+@font-face{font-family:FixtureDashboard;src:url(${JSON.stringify(fontUrl)}) format("woff2");font-display:block}
+:root{color-scheme:dark;font-family:FixtureDashboard,system-ui;background:#111b28;color:#ecf2fa}
+body{margin:0;padding:28px}h1{font-size:28px;margin:0 0 24px}.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+section{padding:24px;border:1px solid #304356;border-radius:16px;background:#1a293a}h2{font-size:15px;margin:0 0 18px}.value{font-size:36px}
+.chart{display:flex;align-items:end;gap:10px;height:170px;margin-top:24px}.chart i{flex:1;background:#6ee7b7;border-radius:5px 5px 0 0}
+</style></head><body><h1>Team metric 1</h1><div class="cards">
+${[72, 85, 96].map((value, index) => `<section><h2>${["Completed work", "Service health", "Availability"][index]}</h2><div class="value">${value}%</div><div class="chart">${[43, 68, 51, 78, 64, value].map((height) => `<i style="height:${height}%"></i>`).join("")}</div></section>`).join("")}
+</div><script>
+document.fonts.ready.then(()=>requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  document.body.dataset.dashboardReady="true";
+  parent.postMessage({type:"openclaw:bench-dashboard-ready",fontLoaded:[...document.fonts].some(face=>face.family==="FixtureDashboard"&&face.status==="loaded")},"*");
+})));
+</script></body></html>`;
 }
 
 /** One deterministic inventory shared by browser benchmarks and focused UI proofs. */
@@ -279,7 +299,19 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
     };
   });
   const boardPath = `/__openclaw__/board/${encodeURIComponent(selectedSessionKey)}/team-overview/index.html`;
-  assets.set(boardPath, { contentType: "text/html", body: widgetHtml(0) });
+  const dashboardFontPath = "/__openclaw__/bench/dashboard-font.woff2";
+  if (options.dashboardWidgetFont) {
+    assets.set(dashboardFontPath, {
+      contentType: "font/woff2",
+      body: options.dashboardWidgetFont,
+    });
+  }
+  assets.set(boardPath, {
+    contentType: "text/html",
+    body: options.dashboardWidgetFont
+      ? dashboardWidgetHtml(new URL(dashboardFontPath, baseUrl).href)
+      : widgetHtml(0),
+  });
   const sandbox = { sandboxUrl: options.sandboxUrl, sandboxPort: options.sandboxPort };
   const board: BoardSnapshot = {
     sessionKey: selectedSessionKey,
@@ -355,6 +387,7 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
       "progressCard.get",
       "cron.list",
       "cron.status",
+      ...(options.dashboardWidgetFont ? ["mcp.app.discover"] : []),
       ...(duplicateReads?.featureMethods ?? []),
     ],
     methodResponses: {
@@ -362,6 +395,7 @@ export function createControlUiTeamScaleFixture(options: FixtureOptions = {}) {
         ? { "session.members.listEvidence": { sessionKey: selectedSessionKey, ...sharingMembers } }
         : {}),
       "question.list": { questions: [] },
+      ...(options.dashboardWidgetFont ? { "mcp.app.discover": { servers: [] } } : {}),
       ...(largeHistory ? { "chat.startup": largeHistory, "chat.history": largeHistory } : {}),
       ...duplicateReads?.methodResponses,
       "agents.list": agents,
