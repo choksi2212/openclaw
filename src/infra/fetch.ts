@@ -38,6 +38,7 @@ export function markWrapsAmbientGlobalFetch(fetchImpl: typeof fetch): void {
 export function isWrapperOfAmbientGlobalFetch(fetchImpl: typeof fetch | undefined): boolean {
   return (
     typeof fetchImpl === "function" &&
+    // SAFETY: read-only probe for the marker set by markWrapsAmbientGlobalFetch; the cast only widens the static view for that single property read.
     (fetchImpl as FetchWithAmbientGlobalFetchMarker)[wrapsAmbientGlobalFetchMarker] === true
   );
 }

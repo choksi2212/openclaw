@@ -963,6 +963,7 @@ src/infra/exec-wrapper-tokens.ts
 src/infra/exec-wrapper-trust-plan.ts
 src/infra/executable-path.ts
 src/infra/fetch-headers.ts
+src/infra/fetch.ts
 src/infra/file-descriptor.ts
 src/infra/file-lock-manager.ts
 src/infra/file-lock-sync.ts

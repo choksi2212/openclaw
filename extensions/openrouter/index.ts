@@ -182,6 +182,7 @@ type EndpointResult =
 
 function describeUsageTransportError(error: unknown): string {
   if (error instanceof Error) {
+    // SAFETY: Node fetch failures attach the transport cause via error.cause; this structural read only accepts an optional message field.
     const cause = (error.cause as { message?: unknown } | null | undefined)?.message;
     const causeSuffix =
       typeof cause === "string" && cause.trim() && cause !== error.message ? ` (${cause})` : "";

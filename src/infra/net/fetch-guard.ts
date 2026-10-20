@@ -419,12 +419,17 @@ async function fetchWithSsrFGuardInternal(
   // ("invalid onRequestStart method" on Node 24). Treat marked wrappers as
   // non-dispatcher-capable so dispatcher-attached hops route through the
   // bundled undici runtime fetch instead of failing inside the wrapper.
+  // Test-installed mocks keep their override independently of that exclusion:
+  // a vi.fn installed as globalThis.fetch and handed over through
+  // resolveFetch() carries both the ambient stamp and the copied mock metadata,
+  // and it must keep receiving init.dispatcher rather than being bypassed for
+  // the bundled runtime fetch.
   const wrapsAmbientGlobalFetch = isWrapperOfAmbientGlobalFetch(params.fetchImpl);
   const supportsDispatcherInit =
-    !wrapsAmbientGlobalFetch &&
-    ((params.fetchImpl !== undefined &&
-      !isAmbientGlobalFetch({ fetchImpl: params.fetchImpl, globalFetch })) ||
-      isUsingMockedFetch);
+    isUsingMockedFetch ||
+    (!wrapsAmbientGlobalFetch &&
+      params.fetchImpl !== undefined &&
+      !isAmbientGlobalFetch({ fetchImpl: params.fetchImpl, globalFetch }));
   // Admission precedes DNS and transport awaits. Capture must not resolve a new
   // session after a delayed request outlives its original capture generation.
   // Bypass only our exact global wrapper so its owner cannot also record.

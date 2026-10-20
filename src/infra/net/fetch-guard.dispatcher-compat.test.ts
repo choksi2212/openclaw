@@ -4,8 +4,12 @@
 // so guarded hops must not hand those wrappers a dispatcher.
 import type { Dispatcher } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  isWrapperOfAmbientGlobalFetch,
+  resolveFetch,
+} from "../fetch.js";
 import { fetchWithSsrFGuard, type GuardedFetchOptions } from "./fetch-guard.js";
-import type { DispatcherAwareRequestInit } from "./runtime-fetch.js";
+import { isMockedFetch, type DispatcherAwareRequestInit } from "./runtime-fetch.js";
 
 const TEST_UNDICI_RUNTIME_DEPS_KEY = "__OPENCLAW_TEST_UNDICI_RUNTIME_DEPS__";
 const { agentCtor, envHttpProxyAgentCtor, proxyAgentCtor } = vi.hoisted(() => {
@@ -115,7 +119,41 @@ describe("fetchWithSsrFGuard dispatcher compatibility", () => {
 
     expect(response.ok).toBe(true);
     expect(observed).toHaveLength(1);
-    expect(observed[0][1]?.dispatcher).toBeDefined();
+    expect(observed.at(0)?.[1]?.dispatcher).toBeDefined();
+  });
+
+  it("keeps a wrapped test-installed global fetch mock ahead of the dispatcher runtime", async () => {
+    installRuntime(
+      vi.fn(async () => {
+        throw new Error("runtime fetch must not bypass an installed mock");
+      }) as unknown as typeof fetch,
+    );
+    const originalFetch = globalThis.fetch;
+    const observed: Array<[unknown, DispatcherAwareRequestInit | undefined]> = [];
+    const globalMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      observed.push([input, init as DispatcherAwareRequestInit | undefined]);
+      return okResponse();
+    }) as unknown as typeof fetch;
+    Reflect.set(globalThis, "fetch", globalMock);
+    try {
+      // The loader path: resolveFetch() wraps whatever globalThis.fetch is and
+      // stamps it, while Object.assign copies the mock metadata onto the wrapper.
+      const wrapped = resolveFetch();
+      expect(isWrapperOfAmbientGlobalFetch(wrapped)).toBe(true);
+      expect(isMockedFetch(wrapped)).toBe(true);
+
+      const { response } = await fetchWithSsrFGuard({
+        url: publicUrl,
+        lookupFn: createPublicLookup(),
+        fetchImpl: wrapped,
+      });
+
+      expect(response.ok).toBe(true);
+      expect(globalMock).toHaveBeenCalledOnce();
+      expect(observed.at(0)?.[1]?.dispatcher).toBeDefined();
+    } finally {
+      Reflect.set(globalThis, "fetch", originalFetch);
+    }
   });
 
   it("keeps test-installed fetch mocks ahead of the bundled dispatcher runtime", async () => {
