@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildPayloads } from "../../agents/embedded-agent-runner/run/payloads.test-helpers.js";
 import {
   getReplyPayloadMetadata,
@@ -59,10 +59,7 @@ describe("cron canonical speech payload delivery", () => {
     const source = setReplyPayloadMetadata({ text }, metadata);
     const normalized = normalizeDirectCronDeliveryPayloads({ deliveryPayloads: [source] });
 
-    expect(normalized.kind).toBe("deliver");
-    if (normalized.kind !== "deliver") {
-      throw new Error("expected visible report after normalization");
-    }
+    assert(normalized.kind === "deliver", "expected visible report after normalization");
     expect(normalized.payload).toEqual([{ text }]);
     expect(getReplyPayloadMetadata(normalized.payload[0]!)).toEqual(metadata);
     expect(source.text).toBe(text);
@@ -92,10 +89,7 @@ describe("cron canonical speech payload delivery", () => {
         preferFinalAssistantVisibleText: channel !== "whatsapp",
       });
       const normalized = normalizeDirectCronDeliveryPayloads(outcome);
-      expect(normalized.kind).toBe("deliver");
-      if (normalized.kind !== "deliver") {
-        throw new Error("expected the canonical cron reply to remain deliverable");
-      }
+      assert(normalized.kind === "deliver", "expected deliverable canonical reply");
 
       const result = await maybeApplyTtsToCronPayloads({
         cfg: createTtsConfig(`openclaw-cron-speech-${randomUUID()}`),
@@ -107,12 +101,8 @@ describe("cron canonical speech payload delivery", () => {
 
       expect(synthesizeMock).toHaveBeenCalledTimes(1);
       expect(synthesizeMock.mock.calls[0]?.[0].text).toBe(spokenText);
-      expect(result).toEqual([
-        expect.objectContaining({
-          text: visibleText,
-          spokenText,
-          mediaUrl: "/tmp/cron-speech-proof.ogg",
-        }),
+      expect(result).toMatchObject([
+        { text: visibleText, spokenText, mediaUrl: "/tmp/cron-speech-proof.ogg" },
       ]);
       expect(getReplyPayloadMetadata(payloads[0]!)?.tts?.text).toBe(spokenText);
     },

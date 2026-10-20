@@ -17,20 +17,15 @@ let unusedPort: number;
 let cleanup: () => Promise<void>;
 
 function providerParams(api: "ollama" | "openai-completions", suffix = "") {
+  const local = {
+    api,
+    baseUrl: `${baseUrl}${suffix}`,
+    apiKey: "synthetic-configured-key",
+    headers: { "x-provider-key": "synthetic-configured-header" },
+    models: [],
+  };
   return {
-    cfg: {
-      models: {
-        providers: {
-          local: {
-            api,
-            baseUrl: `${baseUrl}${suffix}`,
-            apiKey: "synthetic-configured-key",
-            headers: { "x-provider-key": "synthetic-configured-header" },
-            models: [],
-          },
-        },
-      },
-    },
+    cfg: { models: { providers: { local } } },
     provider: "local",
     model: "local-model",
   };

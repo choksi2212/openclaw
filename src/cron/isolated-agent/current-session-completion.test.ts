@@ -15,27 +15,21 @@ import {
 import * as operationAdmission from "../../infra/sqlite-worker-operation-admission.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../infra/sqlite-worker-owner-probe.test-support.js";
 import {
-  captureActivePluginRegistrySnapshot,
-  restoreActivePluginRegistrySnapshot,
-  setActivePluginRegistry,
-} from "../../plugins/runtime.js";
-import {
   beginSessionEffect,
   getSessionMutationCount,
 } from "../../sessions/session-controller.lifecycle.js";
 import { readAssistantDisplayContent } from "../../shared/assistant-display-content.js";
-import {
-  createChannelTestPluginBase,
-  createTestRegistry,
-} from "../../test-utils/channel-plugins.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
-import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { requestActiveCronJobCancellation } from "../active-jobs.js";
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { CronService } from "../service.js";
 import { createNoopLogger } from "../service.test-harness.js";
 import type { CronServiceDeps } from "../service/state.js";
-import { createCompletionFixture, PNG } from "./current-session-completion.test-fixtures.js";
+import {
+  withCompletionFixture,
+  installCompletionChannel,
+  PNG,
+} from "./current-session-completion.test-fixtures.js";
 import * as deliveryPolicy from "./delivery-dispatch-policy.js";
 import { dispatchCronDelivery } from "./delivery-dispatch.js";
 import { resolveDeliveryTarget } from "./delivery-target.js";
@@ -43,19 +37,19 @@ import { resolveDeliveryTarget } from "./delivery-target.js";
 describe("current-session completion delivery", () => {
   it.each(["literal-text", "prepared-media"] as const)(
     "preserves %s output when committing the conversation",
-    async (mode) => {
-      await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        await using fixture = await createCompletionFixture(state);
+    (mode) =>
+      withCompletionFixture(async (fixture) => {
+        const { params } = fixture;
         const hasMedia = mode === "prepared-media";
         const text = hasMedia ? undefined : "NO_REPLY";
-        fixture.params.deliveryPayloads = [
+        params.deliveryPayloads = [
           { text, ...(hasMedia ? { mediaUrl: fixture.payload.mediaUrl } : {}) },
         ];
-        fixture.params.synthesizedText = text;
-        fixture.params.outputText = text;
-        fixture.params.summary = text;
+        params.synthesizedText = text;
+        params.outputText = text;
+        params.summary = text;
 
-        const delivery = await dispatchCronDelivery(fixture.params);
+        const delivery = await dispatchCronDelivery(params);
         expect(delivery.delivered).toBe(true);
         const messages = await fixture.messages();
         expect(messages).toHaveLength(1);
@@ -69,17 +63,16 @@ describe("current-session completion delivery", () => {
           ]);
           expect(await fixture.records()).toHaveLength(1);
         }
-      });
-    },
+      }),
   );
 
-  it("does not write a report into the creator when explicit account intent is unresolved", async () => {
-    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      await using fixture = await createCompletionFixture(state);
-      fixture.params.job.delivery = { mode: "announce", accountId: "work" };
-      fixture.params.deliveryPlan = resolveCronDeliveryPlan(fixture.params.job);
-      fixture.params.deliveryPayloads = [{ text: "Final report" }];
-      const completion = await dispatchCronDelivery(fixture.params);
+  it("does not write a report into the creator when explicit account intent is unresolved", () =>
+    withCompletionFixture(async (fixture) => {
+      const { params } = fixture;
+      params.job.delivery = { mode: "announce", accountId: "work" };
+      params.deliveryPlan = resolveCronDeliveryPlan(params.job);
+      params.deliveryPayloads = [{ text: "Final report" }];
+      const completion = await dispatchCronDelivery(params);
       const messages = await fixture.messages();
       expect(messages).toEqual([]);
       expect(completion).toMatchObject({
@@ -87,8 +80,7 @@ describe("current-session completion delivery", () => {
         deliveryError: "No external channel",
         disposition: { kind: "error", errorKind: "delivery-target" },
       });
-    });
-  });
+    }));
 });
 
 describe("current-session completion media", () => {
@@ -97,41 +89,24 @@ describe("current-session completion media", () => {
     { stage: "commit", revoke: "owner" },
     { stage: "send", revoke: "cancel" },
     { stage: "send", revoke: "owner" },
-  ] as const)(
-    "honors the real occurrence fence after $revoke before $stage",
-    async ({ stage, revoke }) => {
-      await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-        await using fixture = await createCompletionFixture(
-          state,
-          "current",
-          "agent:main:telegram:direct:12345",
-        );
-        fixture.params.cfgWithAgentDefaults.session = {
-          ...fixture.params.cfgWithAgentDefaults.session,
+  ] as const)("honors the real occurrence fence after $revoke before $stage", ({ stage, revoke }) =>
+    withCompletionFixture(
+      async (fixture, state) => {
+        const { params } = fixture;
+        params.cfgWithAgentDefaults.session = {
+          ...params.cfgWithAgentDefaults.session,
           dmScope: "per-channel-peer",
         };
-        const registry = captureActivePluginRegistrySnapshot();
         const sendText = vi.fn(async () => ({ channel: "telegram", messageId: "forbidden" }));
         const sendMedia = vi.fn(async () => ({ channel: "telegram", messageId: "media" }));
-        setActivePluginRegistry(
-          createTestRegistry([
-            {
-              pluginId: "telegram",
-              source: "test",
-              plugin: {
-                ...createChannelTestPluginBase({ id: "telegram" }),
-                outbound: { deliveryMode: "direct", sendText, sendMedia },
-              },
-            },
-          ]),
-        );
+        installCompletionChannel("telegram", { deliveryMode: "direct", sendText, sendMedia });
         let available = true;
         let revoked = false;
         let deliveryWarning = "";
         const revokeOccurrence = () => {
           revoked = true;
           if (revoke === "cancel") {
-            requestActiveCronJobCancellation(fixture.params.job.id, "test occurrence cancelled");
+            requestActiveCronJobCancellation(params.job.id, "test occurrence cancelled");
           } else {
             available = false;
           }
@@ -160,18 +135,18 @@ describe("current-session completion media", () => {
         const runIsolatedAgentJob = vi.fn<CronServiceDeps["runIsolatedAgentJob"]>(
           async ({ job, abortSignal, deliveryAttemptFence }) => {
             expect(deliveryAttemptFence).not.toBeNull();
-            fixture.params.job = job;
-            fixture.params.deliveryPlan = resolveCronDeliveryPlan(job);
-            fixture.params.deliveryAttemptFence = deliveryAttemptFence;
-            fixture.params.abortSignal = abortSignal;
-            fixture.params.isAborted = () => abortSignal?.aborted === true;
-            fixture.params.runStartedAt = Date.now();
-            fixture.params.resolvedDelivery = await resolveDeliveryTarget(
-              fixture.params.cfgWithAgentDefaults,
+            params.job = job;
+            params.deliveryPlan = resolveCronDeliveryPlan(job);
+            params.deliveryAttemptFence = deliveryAttemptFence;
+            params.abortSignal = abortSignal;
+            params.isAborted = () => abortSignal?.aborted === true;
+            params.runStartedAt = Date.now();
+            params.resolvedDelivery = await resolveDeliveryTarget(
+              params.cfgWithAgentDefaults,
               "main",
-              { ...job, ...fixture.params.deliveryPlan },
+              { ...job, ...params.deliveryPlan },
             );
-            const result = await dispatchCronDelivery(fixture.params);
+            const result = await dispatchCronDelivery(params);
             deliveryWarning =
               result.diagnostics?.entries.map(({ message }) => message).join("\n") ?? "";
             expect(result.delivered).toBe(stage === "commit");
@@ -209,7 +184,7 @@ describe("current-session completion media", () => {
           runIsolatedAgentJob,
         });
         try {
-          await state.writeConfig(fixture.params.cfgWithAgentDefaults);
+          await state.writeConfig(params.cfgWithAgentDefaults);
           await cron.start();
           const job = await cron.add({
             name: "fenced result",
@@ -257,69 +232,61 @@ describe("current-session completion media", () => {
           await Promise.allSettled(runIsolatedAgentJob.mock.results.map(({ value }) => value));
           admission.mockRestore();
           tts.mockRestore();
-          restoreActivePluginRegistrySnapshot(registry);
         }
-      });
-    },
+      },
+      "current",
+      "agent:main:telegram:direct:12345",
+    ),
   );
 
-  it("publishes downloadable media and replays the original message after promotion failure", async () => {
-    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      await using fixture = await createCompletionFixture(state);
-      let restorePromotionAdmission: (() => void) | undefined;
-      try {
-        const spy = probe.admission(operationAdmission, (request, grant, admit) => {
-          if (
-            request.stage === "commit" &&
-            isRecord(request.facts) &&
-            request.facts.type === "managedImages.attach"
-          ) {
-            throw new Error("report promotion failed");
-          }
-          admit(request, grant);
+  it("publishes downloadable media and replays the original message after promotion failure", () =>
+    withCompletionFixture(async (fixture) => {
+      using admission = probe.admission(operationAdmission, (request, grant, admit) => {
+        if (
+          request.stage === "commit" &&
+          isRecord(request.facts) &&
+          request.facts.type === "managedImages.attach"
+        ) {
+          throw new Error("report promotion failed");
+        }
+        admit(request, grant);
+      });
+      await expect(fixture.commit()).rejects.toThrow("report promotion failed");
+      expect(fixture.updates()).toBe(0);
+      admission.mockRestore();
+      const original = await fixture.messages();
+      const originalIds = (await fixture.records()).map(({ record }) => record.attachmentId);
+      expect(original).toHaveLength(1);
+      await expect(fixture.commit()).resolves.toMatchObject({ ok: true });
+      expect(await fixture.messages()).toEqual(original);
+      expect((await fixture.records()).map(({ record }) => record.attachmentId)).toEqual(
+        originalIds,
+      );
+      expect(fixture.updates()).toBeGreaterThan(0);
+      for (const { record } of await fixture.records()) {
+        expect(record).toMatchObject({
+          messageId: readTranscriptEventId(original[0]),
+          retentionClass: "history",
         });
-        restorePromotionAdmission = () => spy.mockRestore();
-        await expect(fixture.commit()).rejects.toThrow("report promotion failed");
-        expect(fixture.updates()).toBe(0);
-        restorePromotionAdmission();
-        const original = await fixture.messages();
-        const originalIds = (await fixture.records()).map(({ record }) => record.attachmentId);
-        expect(original).toHaveLength(1);
-        await expect(fixture.commit()).resolves.toMatchObject({ ok: true });
-        expect(await fixture.messages()).toEqual(original);
-        expect((await fixture.records()).map(({ record }) => record.attachmentId)).toEqual(
-          originalIds,
-        );
-        expect(fixture.updates()).toBeGreaterThan(0);
-        for (const { record } of await fixture.records()) {
-          expect(record).toMatchObject({
-            messageId: readTranscriptEventId(original[0]),
-            retentionClass: "history",
-          });
-          await expect(
-            fs.readFile(
-              path.join(
-                record.original.mediaRoot,
-                record.original.mediaSubdir,
-                record.original.mediaId,
-              ),
+        await expect(
+          fs.readFile(
+            path.join(
+              record.original.mediaRoot,
+              record.original.mediaSubdir,
+              record.original.mediaId,
             ),
-          ).resolves.toEqual(PNG);
-        }
-        const downloads = await fixture.downloads();
-        expect(downloads.length).toBeGreaterThan(0);
-        for (const download of downloads) {
-          expect(download).toMatchObject({ type: "image" });
-        }
-      } finally {
-        restorePromotionAdmission?.();
+          ),
+        ).resolves.toEqual(PNG);
       }
-    });
-  });
+      const downloads = await fixture.downloads();
+      expect(downloads.length).toBeGreaterThan(0);
+      for (const download of downloads) {
+        expect(download).toMatchObject({ type: "image" });
+      }
+    }));
 
-  it("preserves interleaved report text, media, and spoken-payload failure metadata", async () => {
-    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      await using fixture = await createCompletionFixture(state);
+  it("preserves interleaved report text, media, and spoken-payload failure metadata", () =>
+    withCompletionFixture(async (fixture, state) => {
       const secondImage = path.join(state.workspaceDir, "second.png");
       await fs.writeFile(secondImage, PNG);
       fixture.params.deliveryPayloads.push(
@@ -347,12 +314,10 @@ describe("current-session completion media", () => {
           attachment: expect.objectContaining({ label: "missing.png" }),
         }),
       ]);
-    });
-  });
+    }));
 
-  it("blocks workspace-only images beside the session store", async () => {
-    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      await using fixture = await createCompletionFixture(state);
+  it("blocks workspace-only images beside the session store", () =>
+    withCompletionFixture(async (fixture) => {
       const privateImage = path.join(path.dirname(fixture.scope.storePath), "private.png");
       await fs.mkdir(path.dirname(privateImage), { recursive: true });
       await fs.writeFile(privateImage, PNG);
@@ -369,12 +334,10 @@ describe("current-session completion media", () => {
         expect.objectContaining({ type: "attachment_error" }),
       ]);
       expect(await fixture.records()).toHaveLength(0);
-    });
-  });
+    }));
 
-  it("does not prepare media when the source generation changes while waiting", async () => {
-    await withOpenClawTestState({ layout: "state-only" }, async (state) => {
-      await using fixture = await createCompletionFixture(state);
+  it("does not prepare media when the source generation changes while waiting", () =>
+    withCompletionFixture(async (fixture) => {
       const admission = await beginSessionEffect({
         scope: fixture.scope.storePath,
         identities: [fixture.scope.sessionKey, fixture.scope.sessionId],
@@ -398,6 +361,5 @@ describe("current-session completion media", () => {
         admission.release();
         await commit;
       }
-    });
-  });
+    }));
 });

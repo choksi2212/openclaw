@@ -103,6 +103,14 @@ const transcriptReaders = await vi.importActual<
 >("../../gateway/session-transcript-readers.js");
 installRequesterCronAuthorityTestHooks();
 
+const toolConstructionPlan = {
+  includeBaseCodingTools: false,
+  includeShellTools: false,
+  includeChannelTools: false,
+  includeOpenClawTools: true,
+  includePluginTools: false,
+};
+
 beforeEach(() => {
   resetRunCronIsolatedAgentTurnHarness();
   vi.stubEnv("OPENCLAW_TEST_FAST", "1");
@@ -237,13 +245,7 @@ describe("same-conversation scheduled operator continuation", () => {
                     githubPublicationAvailable: true,
                     cronCreatorToolAllowlistRef: capturedTools,
                     cronCreatorToolAllowlistCaptureRef: capture,
-                    toolConstructionPlan: {
-                      includeBaseCodingTools: false,
-                      includeShellTools: false,
-                      includeChannelTools: false,
-                      includeOpenClawTools: true,
-                      includePluginTools: false,
-                    },
+                    toolConstructionPlan: { ...toolConstructionPlan },
                   });
                   captureFinalEffectiveCronCreatorToolAllowlist(
                     capturedTools,
@@ -543,13 +545,7 @@ describe("same-conversation scheduled operator continuation", () => {
               runtimeToolAllowlist: params.toolsAllow,
               scheduledToolPolicy: params.scheduledToolPolicy,
               githubPublicationAvailable: true,
-              toolConstructionPlan: {
-                includeBaseCodingTools: false,
-                includeShellTools: false,
-                includeChannelTools: false,
-                includeOpenClawTools: true,
-                includePluginTools: false,
-              },
+              toolConstructionPlan: { ...toolConstructionPlan },
             }),
             params.toolsAllow,
             { toolMeta: getPluginToolMeta },
@@ -640,10 +636,9 @@ describe("same-conversation scheduled operator continuation", () => {
             expect(interrupted).toMatchObject({
               status: "interrupted",
               mainRestartRecovery: { cycleId: expect.any(String) },
+              restartRecoveryDeliverySourceRunId:
+                scenario === "restart" ? interruptedRunId : recovery.target.sourceRunId,
             });
-            expect(interrupted.restartRecoveryDeliverySourceRunId).toBe(
-              scenario === "restart" ? interruptedRunId : recovery.target.sourceRunId,
-            );
             if (scenario !== "restart") {
               expect(
                 readRestartRecoveryRequesterSource({ ...recovery.target, entry: interrupted }),
@@ -694,10 +689,9 @@ describe("same-conversation scheduled operator continuation", () => {
           accessor.loadSessionEntry(recovery.target),
           "settled cron parent",
         );
-        expect(saved.abortedLastRun).toBe(false);
+        expect(saved).toMatchObject({ abortedLastRun: false, status: "interrupted" });
         expect(saved.lifecycleRunId).toBeUndefined();
         expect(saved.activeWriterRunId).toBeUndefined();
-        expect(saved.status).toBe("interrupted");
         expect(hasMainSessionRecoveryClaim(saved)).toBe(false);
         expect(resolveSessionWorkStartBlock(SESSION, saved)).toBeUndefined();
         expect(

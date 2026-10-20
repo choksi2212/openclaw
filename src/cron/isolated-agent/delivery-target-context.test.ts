@@ -25,20 +25,16 @@ it("reads 146 delivery previews without overflowing the session worker", async (
     }));
     await readCronDeliveryTargetContexts(cfg, requests.slice(0, 1));
 
-    const results = await readCronDeliveryTargetContexts(cfg, requests);
-
-    expect(results).toHaveLength(requests.length);
-    expect(results.flatMap((result) => (result.ok ? [] : [String(result.error)]))).toEqual([]);
-    for (const [index, result] of results.entries()) {
-      expect(result).toMatchObject({
+    expect(await readCronDeliveryTargetContexts(cfg, requests)).toMatchObject(
+      requests.map(({ sessionKey }) => ({
         ok: true,
         value: {
-          rawSessionKey: requests[index]?.sessionKey,
+          rawSessionKey: sessionKey,
           usedSharedMainFallback: true,
           main: { delivery: { context: { to: "main-recipient" } } },
         },
-      });
-    }
+      })),
+    );
   });
 });
 
@@ -57,12 +53,7 @@ it("reads current delivery facts without decoding unrelated session payloads", a
           lifecycleRevision: "unchanged-revision",
           label: "unrelated-session-payload".repeat(1500),
           delivery: normalizeSessionDeliveryState({
-            context: {
-              channel: "telegram",
-              to,
-              accountId: "work",
-              threadId: 0,
-            },
+            context: { channel: "telegram", to, accountId: "work", threadId: 0 },
           }),
         },
       );

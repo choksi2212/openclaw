@@ -68,8 +68,6 @@ import {
   resolveAgentModelFallbacksOverrideMock,
 } from "./run.test-harness.js";
 
-// Persistent cron session tests cover lifecycle admission and mutation races.
-
 const runCronIsolatedAgentTurn = await loadRunCronIsolatedAgentTurn();
 const accessor = await vi.importActual<typeof import("../../config/sessions/session-accessor.js")>(
   "../../config/sessions/session-accessor.js",
@@ -81,23 +79,25 @@ function makePersistentCronParams(sessionKey: string) {
     agentId: "main",
     sessionKey,
     job: makeIsolatedAgentJobFixture({
-      // Bind the run to the persistent session key so the run operates on it
-      // directly; `current`/`isolated` targets derive a detached `cron:<id>`
-      // run session instead, which the lifecycle claim assertions do not target.
+      // A persistent target binds admission to this key, not a detached cron run.
       sessionTarget: `session:${sessionKey}`,
       delivery: { mode: "none" },
     }),
   });
 }
 
-function seedPersistentSession(sessionKey: string, sessionId: string) {
-  const initialSessionEntry = makeCronSessionEntry({ sessionId });
+function seedSession(
+  sessionKey: string,
+  initialSessionEntry: ReturnType<typeof makeCronSessionEntry>,
+  options: Parameters<typeof makeCronSession>[0] = {},
+) {
   resolveCronSessionMock.mockReturnValue(
     makeCronSession({
       store: { [sessionKey]: { ...initialSessionEntry } },
       initialSessionEntry,
       isNewSession: false,
       sessionEntry: { ...initialSessionEntry },
+      ...options,
     }),
   );
   loadSessionEntryMock.mockReturnValue({ ...initialSessionEntry });
@@ -158,8 +158,7 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
       }),
     );
 
-    expect(result.status).toBe("ok");
-    expect(result.sessionKey).toBe(runSessionKey);
+    expect(result).toMatchObject({ status: "ok", sessionKey: runSessionKey });
     expect(modelPrompt).toContain(
       `[cron:${jobId} Daily monitor] Read REFRESH.md.\n    Keep indentation.\nCurrent time:`,
     );
@@ -224,16 +223,10 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
       if (!initialSessionEntry) {
         throw new Error("Expected the persisted CLI parent before admission");
       }
-      resolveCronSessionMock.mockReturnValue(
-        makeCronSession({
-          storePath: target.storePath,
-          store: { [target.sessionKey]: { ...initialSessionEntry } },
-          initialSessionEntry,
-          isNewSession: false,
-          lifecycleRevision: "binding-revision",
-          sessionEntry: { ...initialSessionEntry },
-        }),
-      );
+      seedSession(target.sessionKey, initialSessionEntry, {
+        storePath: target.storePath,
+        lifecycleRevision: "binding-revision",
+      });
       loadSessionEntryMock.mockImplementation(() => accessor.loadSessionEntry(target));
       isCliProviderMock.mockImplementation((provider) => provider === "claude-cli");
       resolveAllowedModelRefMock.mockReturnValue({
@@ -317,7 +310,7 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
         ...target,
         sessionKey: `${target.sessionKey}:run:${target.sessionId}`,
       });
-      expect(continuation?.cronRunContinuation?.phase).toBe("ready");
+      expect(continuation).toMatchObject({ cronRunContinuation: { phase: "ready" } });
       expect(continuation?.cliSessionBindings?.["claude-cli"]).toEqual(acceptedBinding);
     },
   );
@@ -329,13 +322,7 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
       sessionId: "previous-session",
     });
     const sessionEntry = makeCronSessionEntry({ sessionId: "isolated-session" });
-    resolveCronSessionMock.mockReturnValue(
-      makeCronSession({
-        store: { [sessionKey]: { ...initialSessionEntry } },
-        initialSessionEntry,
-        sessionEntry,
-      }),
-    );
+    seedSession(sessionKey, initialSessionEntry, { sessionEntry, isNewSession: true });
     loadSessionEntryMock.mockImplementation((_storePath, currentSessionKey) =>
       currentSessionKey === sessionKey ? initialSessionEntry : undefined,
     );
@@ -378,7 +365,7 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
     const sessionKey = "agent:main:telegram:direct:42";
     const sessionId = "shared-session";
     const admissionScope = { scope: inMemoryStorePath, identities: [sessionKey, sessionId] };
-    seedPersistentSession(sessionKey, sessionId);
+    seedSession(sessionKey, makeCronSessionEntry({ sessionId }));
     const runnerStarted = createDeferred();
     const lifecycleInterrupted = createDeferred();
     const releaseRunner = createDeferred();
@@ -422,19 +409,17 @@ describe("runCronIsolatedAgentTurn session lifecycle", () => {
     releaseRunner.resolve();
 
     const [result] = await Promise.all([run, mutation]);
-    expect(result).toEqual(
-      expect.objectContaining({
-        status: "error",
-        error: "agent run aborted for restart | OPENCLAW_RESTART_ABORT",
-      }),
-    );
+    expect(result).toMatchObject({
+      status: "error",
+      error: "agent run aborted for restart | OPENCLAW_RESTART_ABORT",
+    });
     expect(mutationCommitted).toBe(true);
   });
 
   it("releases admission when final lifecycle marking fails", async () => {
     const sessionKey = "agent:main:cron:final-lifecycle-failure";
     const sessionId = "final-lifecycle-session";
-    seedPersistentSession(sessionKey, sessionId);
+    seedSession(sessionKey, makeCronSessionEntry({ sessionId }));
     const originalLogSessionStateChange = diagnostic.logSessionStateChange;
     const logSessionStateChangeSpy = vi
       .spyOn(diagnostic, "logSessionStateChange")
@@ -559,14 +544,7 @@ describe("runCronIsolatedAgentTurn terminal lifecycle", () => {
       const sessionId = "cron-lifecycle-fallback";
       const usesContinuation = outcome === "post-execution-abort";
       const initialSessionEntry = makeCronSessionEntry({ sessionId });
-      resolveCronSessionMock.mockReturnValue(
-        makeCronSession({
-          store: { [sessionKey]: { ...initialSessionEntry } },
-          initialSessionEntry,
-          isNewSession: usesContinuation,
-          sessionEntry: { ...initialSessionEntry },
-        }),
-      );
+      seedSession(sessionKey, initialSessionEntry, { isNewSession: usesContinuation });
       loadSessionEntryMock.mockImplementation((_storePath, key) =>
         key === sessionKey ? { ...initialSessionEntry } : undefined,
       );
@@ -891,16 +869,7 @@ describe("runCronIsolatedAgentTurn terminal lifecycle", () => {
           broadcast.mock.calls.filter(
             ([event, payload]) => event === "chat" && payload.state !== "delta",
           ),
-        ).toEqual([
-          [
-            "chat",
-            expect.objectContaining({
-              runId,
-              state,
-            }),
-            expect.anything(),
-          ],
-        ]);
+        ).toEqual([["chat", expect.objectContaining({ runId, state }), expect.anything()]]);
       } finally {
         releaseFirst.resolve();
         releaseSecond.resolve();

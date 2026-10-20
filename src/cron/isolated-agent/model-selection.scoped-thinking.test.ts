@@ -1,5 +1,3 @@
-// Cron turns must hydrate runtime-only model thinking through the provider-scoped helper,
-// never through a full live catalog build.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { createPluginMetadataSnapshotFixture } from "../../plugins/plugin-metadata.test-support.js";
@@ -26,6 +24,25 @@ const owner = {
   metadataSnapshot: createPluginMetadataSnapshotFixture(),
 } satisfies Parameters<typeof resolveCronThinkingSelection>[0]["owner"];
 
+function selectThinking(
+  provider: string,
+  model: string,
+  agentRuntime: string,
+  entries: Parameters<
+    typeof resolveCronThinkingSelection
+  >[0]["owner"]["modelCatalog"]["entries"] = [],
+  jobThinking = "medium",
+) {
+  return resolveCronThinkingSelection({
+    cfg: {},
+    owner: { ...owner, modelCatalog: { entries, routeVariants: [] } },
+    provider,
+    model,
+    agentRuntime,
+    jobThinking,
+  });
+}
+
 describe("resolveCronThinkingSelection scoped hydration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -40,20 +57,13 @@ describe("resolveCronThinkingSelection scoped hydration", () => {
     "hydrates %s/%s runtime=%s thinking=%s through the scoped owner (host row=%s)",
     async (provider, model, agentRuntime, thinking, hasHostRow) => {
       scopedThinkingCatalogMock.mockResolvedValue([{ provider, id: model, reasoning: true }]);
-      const selection = await resolveCronThinkingSelection({
-        cfg: {},
-        owner: {
-          ...owner,
-          modelCatalog: {
-            entries: hasHostRow ? [{ provider, id: model, name: model, reasoning: false }] : [],
-            routeVariants: [],
-          },
-        },
+      const selection = await selectThinking(
         provider,
         model,
         agentRuntime,
-        jobThinking: thinking,
-      });
+        hasHostRow ? [{ provider, id: model, name: model, reasoning: false }] : [],
+        thinking,
+      );
       expect(selection.requestedThinkLevel).toBe(thinking);
       expect(selection.catalog).toEqual([
         expect.objectContaining({ provider, id: model, reasoning: true }),
@@ -77,14 +87,7 @@ describe("resolveCronThinkingSelection scoped hydration", () => {
   ])("keeps the admitted catalog when hydration has no selected row: %j", async ({ refreshed }) => {
     scopedThinkingCatalogMock.mockResolvedValue(refreshed);
     const carried = { provider: "openai", id: "gpt-5.6-luna", name: "Selected", reasoning: false };
-    const selection = await resolveCronThinkingSelection({
-      cfg: {},
-      owner: { ...owner, modelCatalog: { entries: [carried], routeVariants: [] } },
-      provider: carried.provider,
-      model: carried.id,
-      agentRuntime: "codex",
-      jobThinking: "medium",
-    });
+    const selection = await selectThinking(carried.provider, carried.id, "codex", [carried]);
     expect(selection.catalog).toEqual([carried]);
     expect(selection.requestedThinkLevel).toBe("medium");
     expect(scopedThinkingCatalogMock).toHaveBeenCalledOnce();
@@ -101,14 +104,7 @@ describe("resolveCronThinkingSelection scoped hydration", () => {
         name: "Opus",
         reasoning: true,
       };
-      const pending = resolveCronThinkingSelection({
-        cfg: {},
-        owner: { ...owner, modelCatalog: { entries: [carried], routeVariants: [] } },
-        provider: carried.provider,
-        model: carried.id,
-        agentRuntime: "claude-cli",
-        jobThinking: "medium",
-      });
+      const pending = selectThinking(carried.provider, carried.id, "claude-cli", [carried]);
       const completed = vi.fn();
       void pending.then(completed);
       await vi.advanceTimersByTimeAsync(5_000);
@@ -128,14 +124,7 @@ describe("resolveCronThinkingSelection scoped hydration", () => {
   });
 
   it("keeps the owner catalog and skips hydration when thinking is off", async () => {
-    const selection = await resolveCronThinkingSelection({
-      cfg: {},
-      owner,
-      provider: "ollama",
-      model: "minimax-m3:cloud",
-      agentRuntime: "openclaw",
-      jobThinking: "off",
-    });
+    const selection = await selectThinking("ollama", "minimax-m3:cloud", "openclaw", [], "off");
     expect(selection.requestedThinkLevel).toBe("off");
     expect(scopedThinkingCatalogMock).not.toHaveBeenCalled();
   });

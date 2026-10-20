@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
+import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import { setRuntimeConfigSnapshot } from "../../config/config.js";
 import {
   loadSessionEntryReadOnly,
@@ -14,9 +15,21 @@ import {
 } from "../../gateway/managed-image-attachments.js";
 import { listManagedImageRecordEntries } from "../../gateway/managed-image-record-store.js";
 import { managedImageRecordReadOperations } from "../../gateway/managed-image-record-store.kernel.js";
+import {
+  captureActivePluginRegistrySnapshot,
+  restoreActivePluginRegistrySnapshot,
+  setActivePluginRegistry,
+} from "../../plugins/runtime.js";
 import { onSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import { openOpenClawStateDatabase } from "../../state/openclaw-state-db.js";
-import type { OpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import {
+  createChannelTestPluginBase,
+  createTestRegistry,
+} from "../../test-utils/channel-plugins.js";
+import {
+  withOpenClawTestState,
+  type OpenClawTestState,
+} from "../../test-utils/openclaw-test-state.js";
 import { commitCronConversationResult } from "../conversation-result.js";
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { makeCronJob } from "../delivery.test-helpers.js";
@@ -29,7 +42,46 @@ export const PNG = Buffer.from(
   "base64",
 );
 
-export async function createCompletionFixture(
+export function installCompletionChannel(
+  channel: ChannelPlugin["id"],
+  outbound: ChannelPlugin["outbound"],
+  messaging?: ChannelPlugin["messaging"],
+) {
+  setActivePluginRegistry(
+    createTestRegistry([
+      {
+        pluginId: channel,
+        source: "test",
+        plugin: {
+          ...createChannelTestPluginBase({ id: channel }),
+          outbound,
+          ...(messaging ? { messaging } : {}),
+        },
+      },
+    ]),
+  );
+}
+
+export function withCompletionFixture(
+  run: (
+    fixture: Awaited<ReturnType<typeof createCompletionFixture>>,
+    state: OpenClawTestState,
+  ) => Promise<void>,
+  sessionTarget: "current" | "isolated" = "current",
+  sessionKey?: string,
+) {
+  return withOpenClawTestState({ layout: "state-only" }, async (state) => {
+    await using fixture = await createCompletionFixture(state, sessionTarget, sessionKey);
+    const registry = captureActivePluginRegistrySnapshot();
+    try {
+      await run(fixture, state);
+    } finally {
+      restoreActivePluginRegistrySnapshot(registry);
+    }
+  });
+}
+
+async function createCompletionFixture(
   state: OpenClawTestState,
   sessionTarget: "current" | "isolated" = "current",
   sessionKey = "agent:main:webchat:direct:report",
