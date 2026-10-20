@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { collectPatchedMcpArtifactErrors } from "../../scripts/lib/package-bundled-mcp.mts";
+import { collectPatchedMcpArtifactErrors as errors } from "../../scripts/lib/package-bundled-mcp.mts";
 
 // Independent expectations from v2026.9.6 (eb377ac59e6) through the 1.10.1 upgrade.
 const SHARED_HASHES = {
@@ -52,16 +52,17 @@ it("preserves the bootstrap producer's current-runtime default", () => {
       version,
       CONTRACT_HASHES[version],
     );
-    const errors = collectPatchedMcpArtifactErrors(input);
+    const result = errors(input);
     if (version === "1.10.1") {
-      expect(errors).toEqual([]);
+      expect(result).toEqual([]);
     } else {
-      expect(errors).toContain("bundled chrome-devtools-mcp must be ESM version 1.10.1");
+      expect(result).toContain(ESM_ERROR);
     }
   }
 });
 
 const CLI = "build/src/bin/chrome-devtools-mcp.js";
+const ESM_ERROR = "bundled chrome-devtools-mcp must be ESM version 1.10.1";
 const ASSETS = [
   "build/src/third_party/devtools-formatter-worker.js",
   "build/src/third_party/devtools-heap-snapshot-worker.js",
@@ -80,13 +81,13 @@ function fixture(version = "1.10.1", hashes = CONTRACT_HASHES["1.10.1"]) {
 }
 
 it.each(Object.entries(CONTRACT_HASHES))("accepts the intact %s contract", (version, hashes) => {
-  expect(collectPatchedMcpArtifactErrors(fixture(version, hashes))).toEqual([]);
+  expect(errors(fixture(version, hashes))).toEqual([]);
 });
 
 it("rejects changed runtime bytes even with artifact-supplied replacement hashes", () => {
   const input = fixture();
   expect(
-    collectPatchedMcpArtifactErrors({
+    errors({
       ...input,
       manifest: { ...input.manifest, hashes: { [CLI]: "0".repeat(64) } },
       sha256: () => "0".repeat(64),
@@ -99,26 +100,23 @@ it("rejects changed runtime bytes even with artifact-supplied replacement hashes
 });
 
 it.each([
-  ["1.9.0", "module", "./" + CLI, ["bundled chrome-devtools-mcp must be ESM version 1.10.1"]],
+  ["1.9.0", "module", "./" + CLI, [ESM_ERROR]],
   [
     "1.10.1",
     "commonjs",
     "./other.js",
-    [
-      "bundled chrome-devtools-mcp must be ESM version 1.10.1",
-      "bundled chrome-devtools-mcp must expose CLI " + CLI,
-    ],
+    [ESM_ERROR, "bundled chrome-devtools-mcp must expose CLI " + CLI],
   ],
-] as const)("rejects an incompatible manifest: %s/%s/%s", (version, type, bin, errors) => {
+] as const)("rejects an incompatible manifest: %s/%s/%s", (version, type, bin, expectedErrors) => {
   const input = fixture();
   input.manifest = { version, type, bin: { "chrome-devtools-mcp": bin } };
-  expect(collectPatchedMcpArtifactErrors(input)).toEqual(errors);
+  expect(errors(input)).toEqual(expectedErrors);
 });
 
 it("reports every missing runtime entry", () => {
   const input = fixture();
   input.files.clear();
-  expect(collectPatchedMcpArtifactErrors(input).toSorted()).toEqual(
+  expect(errors(input).toSorted()).toEqual(
     [
       ...[...ASSETS.slice(0, -1), ...Object.keys(CONTRACT_HASHES["1.10.1"])].map(
         (file) => "bundled chrome-devtools-mcp is missing required runtime entry " + file,
@@ -130,7 +128,7 @@ it("reports every missing runtime entry", () => {
 
 it.each([null, "toString"])("rejects unpinned or unknown declarations: %s", (declaredVersion) => {
   expect(
-    collectPatchedMcpArtifactErrors({
+    errors({
       ...fixture("1.8.0", CONTRACT_HASHES["1.8.0"]),
       declaredVersion,
     }),

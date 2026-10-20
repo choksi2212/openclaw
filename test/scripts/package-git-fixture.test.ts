@@ -7,6 +7,10 @@ import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 describe("package git fixture", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+  const sourceScripts = {
+    openclaw: "node scripts/run-node.mjs",
+    postinstall: "node scripts/postinstall-bundled-plugins.mjs",
+  };
   function write(root: string, file: string, content: string | object) {
     const target = path.join(root, file);
     mkdirSync(path.dirname(target), { recursive: true });
@@ -41,14 +45,7 @@ describe("package git fixture", () => {
     });
     prepare(root);
     const npm = resolveNpmRunner({
-      npmArgs: [
-        "install",
-        "--omit=dev",
-        "--offline",
-        "--ignore-scripts",
-        "--no-fund",
-        "--no-audit",
-      ],
+      npmArgs: "install --omit=dev --offline --ignore-scripts --no-fund --no-audit".split(" "),
     });
     const installed = spawnSync(npm.command, npm.args, {
       cwd: root,
@@ -73,11 +70,7 @@ describe("package git fixture", () => {
     write(root, "package.json", {
       dependencies: { "@openclaw/ai": "2026.6.11", chalk: "5.6.2" },
       bundleDependencies: ["@openclaw/ai", "chalk"],
-      scripts: {
-        build: "node build.mjs",
-        openclaw: "node scripts/run-node.mjs",
-        postinstall: "node scripts/postinstall-bundled-plugins.mjs",
-      },
+      scripts: { ...sourceScripts, build: "node build.mjs" },
     });
     write(root, "node_modules/@openclaw/ai/package.json", {
       name: "@openclaw/ai",
@@ -94,10 +87,7 @@ describe("package git fixture", () => {
     const packageJson = readJson(root);
     expect(packageJson.dependencies["@openclaw/ai"]).toBe("file:.openclaw-fixture/packages/ai");
     expect(packageJson.bundleDependencies).toEqual(["chalk"]);
-    expect(packageJson.scripts).toEqual({
-      build: "node build.mjs",
-      openclaw: "node openclaw.mjs",
-    });
+    expect(packageJson.scripts).toEqual({ build: "node build.mjs", openclaw: "node openclaw.mjs" });
     const relocatedAiPackage = readJson(root, ".openclaw-fixture/packages/ai/package.json");
     expect(relocatedAiPackage).toMatchObject({
       name: "@openclaw/ai",
@@ -136,18 +126,11 @@ describe("package git fixture", () => {
     const root = tempDirs.make("openclaw-package-git-fixture-no-ai-");
     write(root, "package.json", {
       dependencies: { chalk: "5.6.2" },
-      scripts: {
-        lint: "node lint.mjs",
-        openclaw: "node scripts/run-node.mjs",
-        postinstall: "node scripts/postinstall-bundled-plugins.mjs",
-      },
+      scripts: { ...sourceScripts, lint: "node lint.mjs" },
     });
     prepare(root);
     const packageJson = readJson(root);
-    expect(packageJson.scripts).toEqual({
-      lint: "node lint.mjs",
-      openclaw: "node openclaw.mjs",
-    });
+    expect(packageJson.scripts).toEqual({ lint: "node lint.mjs", openclaw: "node openclaw.mjs" });
     expect(packageJson.dependencies).not.toHaveProperty("@openclaw/ai");
   });
 });

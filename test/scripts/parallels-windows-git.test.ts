@@ -4,27 +4,19 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
-const { runMock } = vi.hoisted(() => ({
-  runMock: vi.fn(),
-}));
+const { runMock } = vi.hoisted(() => ({ runMock: vi.fn() }));
 
 vi.mock("../../scripts/e2e/parallels/host-command.ts", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("../../scripts/e2e/parallels/host-command.ts")>();
-  return {
-    ...actual,
-    run: runMock,
-    say: vi.fn(),
-  };
+  return { ...actual, run: runMock, say: vi.fn() };
 });
 
 import { prepareMinGitZip } from "../../scripts/e2e/parallels/windows-git.ts";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-afterEach(() => {
-  runMock.mockReset();
-});
+afterEach(() => runMock.mockReset());
 
 function mockMinGitDownload(arch: string, content: string, digest?: string) {
   const assetName = `MinGit-2.55.0.5-${arch}.zip`;
