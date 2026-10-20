@@ -34,6 +34,9 @@ const { values } = parseArgs({
     "unchanged-files": { type: "string", default: "0" },
     "managed-worktree": { type: "boolean", default: false },
     "scoped-reader": { type: "boolean", default: false },
+    "entry-snapshot-kib": { type: "string" },
+    historical: { type: "boolean" },
+    allocations: { type: "boolean", default: false },
     port: { type: "string", default: "41072" },
     entry: { type: "string", default: "dist/entry.js" },
     clients: { type: "string", default: "4" },
@@ -41,7 +44,6 @@ const { values } = parseArgs({
     rounds: { type: "string", default: "5" },
     "warmup-cohorts": { type: "string", default: "5" },
     scenario: { type: "string", default: "all" },
-    allocations: { type: "boolean", default: false },
     "start-at": { type: "string" },
     output: { type: "string" },
     revision: { type: "string" },
@@ -72,7 +74,10 @@ const startAt = values["start-at"] ? integer(values["start-at"], "--start-at") :
 const trackedFiles = integer(values["tracked-files"], "--tracked-files", 0);
 const untrackedFiles = integer(values["untracked-files"], "--untracked-files", 0);
 const unchangedFiles = integer(values["unchanged-files"], "--unchanged-files", 0);
+const entrySnapshotKiB = integer(values["entry-snapshot-kib"] ?? "0", "--entry-snapshot-kib", 0);
+const historical = values.historical ?? false;
 const sessionId = "history-diff-measure";
+const currentSessionId = historical ? `${sessionId}-current` : sessionId;
 const sessionKey = `agent:main:${sessionId}`;
 const seedDir = path.join(root, "history-diff-fixture");
 const seedPath = path.join(seedDir, "summary.json");
@@ -100,6 +105,11 @@ async function seed() {
     const worktree = path.join(seedDir, "worktree");
     const branch = "fixture/history-diff";
     const lifecycleRevision = "history-diff-fixture-v1";
+    const currentLifecycleRevision = historical
+      ? `${lifecycleRevision}-current`
+      : lifecycleRevision;
+    const snapshotPrompt = "s".repeat(entrySnapshotKiB * 1024);
+    const transcriptHash = createHash("sha256");
     mkdirSync(repo);
     const git = (...args: string[]) =>
       promisify(execFile)("git", ["-C", repo, ...args], {
@@ -183,8 +193,8 @@ async function seed() {
                 worktree_id: managedBinding.id,
                 agent_id: "main",
                 session_key: sessionKey,
-                session_id: sessionId,
-                lifecycle_revision: lifecycleRevision,
+                session_id: currentSessionId,
+                lifecycle_revision: currentLifecycleRevision,
                 projection_path: worktree,
                 base_commit: baseCommit,
                 source_paths_json: "[]",
@@ -203,11 +213,11 @@ async function seed() {
         );
       }
       const databaseOptions = { agentId: "main", env };
-      agentDb.runOpenClawAgentWriteTransaction((database) => {
+      const seededEntry = agentDb.runOpenClawAgentWriteTransaction((database) => {
         if (entries.readExactSessionEntryRow(database, sessionKey)) {
           throw new Error("Synthetic history/diff session already exists");
         }
-        entries.writeSessionEntry(database, sessionKey, {
+        return entries.writeSessionEntry(database, sessionKey, {
           sessionId,
           createdAt: fixtureNow,
           updatedAt: fixtureNow,
@@ -218,6 +228,9 @@ async function seed() {
           spawnedCwd: worktree,
           ...(managedBinding ? { worktree: managedBinding } : {}),
           sessionDiffBaseline: baseline,
+          ...(entrySnapshotKiB > 0
+            ? { skillsSnapshot: { prompt: snapshotPrompt, skills: [] } }
+            : {}),
         });
       }, databaseOptions);
       let parentId: string | null = null;
@@ -278,12 +291,27 @@ async function seed() {
           });
           parentId = id;
         }
+        for (const event of events) {
+          transcriptHash.update(JSON.stringify(event)).update("\n");
+        }
         agentDb.runOpenClawAgentWriteTransaction((database) => {
           transcripts.appendTranscriptEventsInTransaction(
             database,
             { ...databaseOptions, sessionId, sessionKey },
             events,
           );
+        }, databaseOptions);
+      }
+      if (historical) {
+        agentDb.runOpenClawAgentWriteTransaction((database) => {
+          entries.writeSessionEntry(database, sessionKey, {
+            ...seededEntry,
+            sessionId: currentSessionId,
+            previousSessionId: sessionId,
+            updatedAt: fixtureNow + 64,
+            lifecycleRevision: currentLifecycleRevision,
+            sessionDiffBaseline: { ...baseline, sessionId: currentSessionId },
+          });
         }, databaseOptions);
       }
       for (let index = 0; index < trackedFiles; index++) {
@@ -303,6 +331,11 @@ async function seed() {
         format: "openclaw-history-diff-v1",
         sessionKey,
         sessionId,
+        currentSessionId,
+        historical,
+        entrySnapshotKiB,
+        entrySnapshotSha256: createHash("sha256").update(snapshotPrompt).digest("hex"),
+        transcriptSha256: transcriptHash.digest("hex"),
         logicalBytes,
         messages: 256,
         trackedFiles,
@@ -343,6 +376,25 @@ async function measure() {
   const seeded: unknown = JSON.parse(readFileSync(seedPath, "utf8"));
   if (!isRecord(seeded) || seeded.format !== "openclaw-history-diff-v1") {
     throw new Error("Run --seed once while the fixture is offline");
+  }
+  const historicalRead = seeded.historical ?? false;
+  const seededSnapshotKiB = seeded.entrySnapshotKiB ?? 0;
+  if (
+    typeof historicalRead !== "boolean" ||
+    typeof seededSnapshotKiB !== "number" ||
+    !Number.isSafeInteger(seededSnapshotKiB) ||
+    seededSnapshotKiB < 0 ||
+    seeded.sessionKey !== sessionKey ||
+    seeded.sessionId !== sessionId ||
+    (seeded.currentSessionId ?? sessionId) !== (historicalRead ? `${sessionId}-current` : sessionId)
+  ) {
+    throw new Error("Invalid seeded history generation or entry snapshot size");
+  }
+  if (
+    (values.historical !== undefined && values.historical !== historicalRead) ||
+    (values["entry-snapshot-kib"] !== undefined && entrySnapshotKiB !== seededSnapshotKiB)
+  ) {
+    throw new Error("--historical and --entry-snapshot-kib must match the offline seed");
   }
   const seededCount = (field: "trackedFiles" | "untrackedFiles") => {
     const count = seeded[field];
@@ -553,17 +605,23 @@ async function measure() {
         readerProfileIds.add(self.profile.id);
       }
     }
+    const historyParams = historicalRead ? { sessionId } : {};
     const allVariants = [
       {
         name: "history-small",
         method: "chat.history",
-        params: { limit: 20, maxBytes: 32 * 1024, toolResultMaxChars: 8192 },
+        params: { ...historyParams, limit: 20, maxBytes: 32 * 1024, toolResultMaxChars: 8192 },
       },
-      { name: "history-default", method: "chat.history", params: {} },
+      { name: "history-default", method: "chat.history", params: { ...historyParams } },
       {
         name: "history-large",
         method: "chat.history",
-        params: { limit: 256, maxBytes: 2 * 1024 * 1024, toolResultMaxChars: 500_000 },
+        params: {
+          ...historyParams,
+          limit: 256,
+          maxBytes: 2 * 1024 * 1024,
+          toolResultMaxChars: 500_000,
+        },
       },
       ...(["all", "uncommitted"] as const).map((scope) => ({
         name: `diff-${scope}-full`,
@@ -581,6 +639,7 @@ async function measure() {
       );
     }
     const diffHashes = new Map<string, string>();
+    const historicalMessageHashes = new Map<string, string>();
     const request = async (
       client: (typeof clients)[number],
       variant: (typeof variants)[number],
@@ -623,6 +682,17 @@ async function measure() {
         Object.entries(response).filter(([key]) => key !== "root" && key !== "sessionKey"),
       );
       const payloadSha256 = createHash("sha256").update(JSON.stringify(comparable)).digest("hex");
+      const historyMessagesSha256 =
+        historicalRead && variant.method === "chat.history"
+          ? createHash("sha256").update(JSON.stringify(rows)).digest("hex")
+          : undefined;
+      if (historyMessagesSha256) {
+        const previous = historicalMessageHashes.get(variant.name);
+        if (previous && previous !== historyMessagesSha256) {
+          throw new Error(`${variant.name}: retained transcript returned different message bytes`);
+        }
+        historicalMessageHashes.set(variant.name, historyMessagesSha256);
+      }
       if (variant.method === "sessions.diff") {
         const previous = diffHashes.get(variant.name);
         if (previous && previous !== payloadSha256) {
@@ -634,6 +704,7 @@ async function measure() {
         elapsedMs,
         payloadBytes: Buffer.byteLength(JSON.stringify(response)),
         payloadSha256,
+        ...(historyMessagesSha256 ? { historyMessagesSha256 } : {}),
         rows: rows.length,
       };
     };
@@ -687,6 +758,7 @@ async function measure() {
             profilePath,
             clientCount * operations,
             workload,
+            { includeWorkers: true },
           );
           cpu = profileResult.cpu;
         } else {
@@ -717,6 +789,7 @@ async function measure() {
           samples,
           cpu,
           profile: profileResult,
+          ...(values.allocations ? { workerProfileIndexPath: `${profilePath}.workers.json` } : {}),
         };
         results.push(result);
         console.log(
@@ -738,7 +811,7 @@ async function measure() {
       revision: values.revision ?? null,
       entry: values.entry,
       scenario: values.scenario,
-      profiling: values.allocations ? "allocations" : "cpu",
+      profiling: values.allocations ? "main-and-worker-allocations" : "main-cpu",
       reader: scopedReader ? "scoped-profile" : "admin",
       readerProfileIds: [...readerProfileIds],
       fixture,

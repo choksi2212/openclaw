@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import type { HeapProfiler, Profiler } from "node:inspector";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Worker } from "node:worker_threads";
+import type { DiagnosticMemoryUsage } from "../../src/infra/diagnostic-process-types.ts";
 import type { WorkerMessageMetric } from "../../src/infra/worker-message-metrics.ts";
 import type { startGatewayBenchDiagnostics } from "./gateway-bench-diagnostics.ts";
 
@@ -33,6 +35,28 @@ export type GatewayResourceSnapshot = GatewayCpuUsageSnapshot & {
   memory: NodeJS.MemoryUsage;
   activeResources: Record<string, number>;
   runtime: { node: string; platform: string; arch: string };
+  workers?: GatewayWorkerResourceSnapshot[];
+};
+
+export type GatewayWorkerResourceSnapshot = Pick<
+  NonNullable<DiagnosticMemoryUsage["workerHeaps"]>[number],
+  "script" | "workerSlot" | "arrayBuffers" | "heapSpaces" | "retainedData" | "sampleAgeMs"
+> & {
+  threadId: number;
+  cpu?: NodeJS.CpuUsage;
+  heap?: Awaited<ReturnType<Worker["getHeapStatistics"]>>;
+  error?: string;
+  gcError?: string;
+  snapshotPath?: string;
+  snapshotError?: string;
+};
+
+type GatewayResourceOptions = {
+  initial?: boolean;
+  collectGarbage?: boolean;
+  snapshotPath?: string;
+  includeWorkers?: boolean;
+  workerSnapshotPathPrefix?: string;
 };
 
 export type GatewayBenchCommand =
@@ -44,14 +68,11 @@ export type GatewayBenchCommand =
       captureId?: string;
     }
   | { channel: typeof GATEWAY_PROFILE_CHANNEL; kind: "cpu-usage"; action: "sample" }
-  | {
+  | ({
       channel: typeof GATEWAY_PROFILE_CHANNEL;
       kind: "resource-usage";
       action: "sample";
-      initial?: boolean;
-      collectGarbage?: boolean;
-      snapshotPath?: string;
-    };
+    } & GatewayResourceOptions);
 
 type GatewayProfileReply = {
   channel: typeof GATEWAY_PROFILE_CHANNEL;
@@ -245,10 +266,10 @@ export async function readGatewayCpuUsage(child: ChildProcess): Promise<GatewayC
   return reply.cpuUsage;
 }
 
-/** Samples the Gateway itself, not the controller or its descendants. */
+/** Samples the owned Gateway, with optional direct-worker isolate measurements. */
 export async function readGatewayResources(
   child: ChildProcess,
-  options: { initial?: boolean; collectGarbage?: boolean; snapshotPath?: string } = {},
+  options: GatewayResourceOptions = {},
 ): Promise<GatewayResourceSnapshot> {
   const reply = await sendGatewayBenchCommand(child, {
     channel: GATEWAY_PROFILE_CHANNEL,
@@ -299,6 +320,8 @@ async function sendGatewayBenchCommand(
   command: GatewayBenchCommand,
 ): Promise<GatewayProfileReply> {
   const { kind, action } = command;
+  const timeoutMs =
+    kind === "resource-usage" && command.workerSnapshotPathPrefix ? 300_000 : 30_000;
   return await new Promise<GatewayProfileReply>((resolve, reject) => {
     const finish = (result: Error | GatewayProfileReply) => {
       clearTimeout(timer);
@@ -327,8 +350,8 @@ async function sendGatewayBenchCommand(
     const onDisconnect = () =>
       finish(new Error(`Gateway disconnected during ${kind} profile ${action}`));
     const timer = setTimeout(
-      () => finish(new Error(`Gateway ${kind} profile ${action} timed out after 30000ms`)),
-      30_000,
+      () => finish(new Error(`Gateway ${kind} profile ${action} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
     );
     child.on("message", onMessage);
     child.once("exit", onExit);
@@ -396,12 +419,13 @@ export async function measureGatewayAllocations(
   profilePath: string,
   operationCount: number,
   workload: () => Promise<void>,
+  options: { includeWorkers?: boolean } = {},
 ) {
   if (!Number.isSafeInteger(operationCount) || operationCount < 1) {
     throw new Error("Allocation measurement needs a positive operation count");
   }
   const before = await readGatewayResources(child);
-  await controlGatewayProfile(child, "heap", "start", profilePath);
+  await controlGatewayProfile(child, "heap", "start", profilePath, options);
   try {
     await workload();
   } finally {

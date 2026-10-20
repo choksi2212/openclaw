@@ -84,6 +84,9 @@ const { values } = parseArgs({
     "warmup-ms": { type: "string", default: "300000" },
     "round-interval-ms": { type: "string", default: "15000" },
     "memory-interval-ms": { type: "string", default: "60000" },
+    "worker-memory": { type: "boolean", default: false },
+    "worker-snapshots": { type: "boolean", default: false },
+    "idle-duration-ms": { type: "string", default: "0" },
     "retained-profile-ms": { type: "string", default: "600000" },
     "reset-every-rounds": { type: "string", default: "20" },
     chunks: { type: "string", default: "100" },
@@ -176,6 +179,11 @@ const durationMs = integer(values["duration-ms"], "--duration-ms");
 const warmupMs = integer(values["warmup-ms"], "--warmup-ms", 0);
 const roundIntervalMs = integer(values["round-interval-ms"], "--round-interval-ms");
 const memoryIntervalMs = integer(values["memory-interval-ms"], "--memory-interval-ms");
+const workerMemory = values["worker-memory"] || values["worker-snapshots"];
+const idleDurationMs = integer(values["idle-duration-ms"], "--idle-duration-ms", 0);
+if ((workerMemory || idleDurationMs > 0) && !soakScenario) {
+  throw new Error("Worker measurements and --idle-duration-ms require --scenario memory-soak");
+}
 const retainedProfileMs = integer(values["retained-profile-ms"], "--retained-profile-ms", 0);
 const resetEveryRounds = integer(values["reset-every-rounds"], "--reset-every-rounds", 0);
 if (
@@ -1841,6 +1849,7 @@ try {
     retentionScenario || soakScenario
       ? await readGatewayResources(gateway, {
           collectGarbage: !soakScenario || !values.allocations,
+          includeWorkers: workerMemory,
         })
       : undefined;
   const soakAllocationPath =
@@ -1868,21 +1877,41 @@ try {
     completedRounds: number;
     sessionResets: number;
     collectedGarbage: boolean;
+    phase: "steady" | "idle";
     resources: Awaited<ReturnType<typeof readGatewayResources>>;
   }> = [];
-  const sampleMemory = async (collectGarbage = false) => {
-    const resources = await readGatewayResources(measuredGateway, { collectGarbage });
+  const sampleMemory = async (collectGarbage = false, phase: "steady" | "idle" = "steady") => {
+    const resources = await readGatewayResources(measuredGateway, {
+      collectGarbage,
+      includeWorkers: workerMemory,
+    });
     const sample = {
       atEpochMs: Date.now(),
       elapsedMs: Date.now() - measurementStartedAt,
       completedRounds: samples.length,
       sessionResets,
       collectedGarbage: collectGarbage,
+      phase,
       resources,
     };
     memorySamples.push(sample);
     appendFileSync(path.join(output, "memory-samples.jsonl"), `${JSON.stringify(sample)}\n`);
     console.log(`MEMORY ${JSON.stringify(sample)}`);
+    if (workerMemory) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/diagnostics/prometheus`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) {
+        throw new Error(`worker metrics scrape failed: HTTP ${response.status}`);
+      }
+      writeFileSync(
+        path.join(output, `workers-${sample.atEpochMs}.prom`),
+        (await response.text())
+          .split("\n")
+          .filter((line) => /^openclaw_(worker_|gc_)/u.test(line))
+          .join("\n"),
+      );
+    }
   };
   const retainedProfilePath = path.join(output, "retained.heapprofile");
   let retainedProfileStartedAt: number | undefined;
@@ -1946,6 +1975,7 @@ try {
       connect: [],
     };
     const listLatencies = rpcLatencies["sessions.list"]!;
+    const workerRpcLatencies: Record<string, number[]> = {};
     const initialPollPhasesMs: number[] = [];
     let streamStart: Awaited<ReturnType<typeof runRound>> | undefined;
     const listRequests: Array<{
@@ -2085,6 +2115,25 @@ try {
       try {
         streamStart = await runScenario(round);
         await drainEvents();
+        if (workerMemory) {
+          for (const [index, client] of clients.entries()) {
+            for (const [method, params, field] of [
+              ["chat.history", { sessionKey: keys[index % keys.length], limit: 50 }, "messages"],
+              ["models.list", {}, "models"],
+            ] as const) {
+              const started = performance.now();
+              const result = await rpc(client, method, params);
+              if (
+                !isRecord(result) ||
+                !Array.isArray(result[field]) ||
+                result[field].length === 0
+              ) {
+                throw new Error(`${method} did not return a populated ${field} page`);
+              }
+              (workerRpcLatencies[method] ??= []).push(performance.now() - started);
+            }
+          }
+        }
       } finally {
         polling = false;
         stopPolling();
@@ -2222,6 +2271,7 @@ try {
           }
         : {}),
       activeWorkCounts,
+      ...(workerMemory ? { workerRpcLatencies } : {}),
       toolCalls,
       toolResults,
       ...((retentionScenario || soakScenario) && { reasoningResponses, reasoningReplayRequests }),
@@ -2326,8 +2376,9 @@ try {
   let retainedProfile;
   if (soakScenario) {
     await sampleMemory();
-    await sampleMemory(true);
     if (retainedProfileStartedAt !== undefined) {
+      // Preserve retained-profile collection without collecting the workers before their idle phase.
+      await readGatewayResources(gateway, { collectGarbage: true });
       await controlGatewayProfile(gateway, "heap", "stop", retainedProfilePath);
       const { sampledAllocatedBytes, topAllocationSites, ...profile } = readGatewayHeapProfile(
         retainedProfilePath,
@@ -2343,10 +2394,32 @@ try {
     } else if (retainedProfileMs > 0) {
       throw new Error("no retained profile window captured; shorten the round duration");
     }
-    if (values["heap-snapshot"]) {
-      await readGatewayResources(gateway, {
-        snapshotPath: path.join(output, "settled.heapsnapshot"),
+    if (idleDurationMs > 0) {
+      for (const client of clients) {
+        client.close();
+      }
+      console.log("PHASE idle");
+      const idleStartedAt = Date.now();
+      while (Date.now() - idleStartedAt < idleDurationMs) {
+        await delay(Math.min(memoryIntervalMs, idleDurationMs - (Date.now() - idleStartedAt)));
+        await sampleMemory(false, "idle");
+      }
+    }
+    await sampleMemory(true, idleDurationMs > 0 ? "idle" : "steady");
+    if (values["heap-snapshot"] || values["worker-snapshots"]) {
+      const snapshots = await readGatewayResources(gateway, {
+        ...(values["heap-snapshot"]
+          ? { snapshotPath: path.join(output, "settled.heapsnapshot") }
+          : {}),
+        includeWorkers: workerMemory,
+        ...(values["worker-snapshots"]
+          ? { workerSnapshotPathPrefix: path.join(output, "settled") }
+          : {}),
       });
+      writeFileSync(
+        path.join(output, "snapshot-resources.json"),
+        JSON.stringify(snapshots, null, 2),
+      );
     }
   }
   let diffEditVisibilityMs: number | undefined;
@@ -2461,6 +2534,8 @@ try {
           warmupMs,
           roundIntervalMs,
           memoryIntervalMs,
+          workerMemory,
+          idleDurationMs,
           retainedProfileMs,
           resetEveryRounds,
           sessionResets,

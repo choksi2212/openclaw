@@ -1,12 +1,15 @@
-import { writeFileSync } from "node:fs";
+import { createWriteStream, writeFileSync } from "node:fs";
 import type { Session } from "node:inspector/promises";
 import { performance } from "node:perf_hooks";
+import { pipeline } from "node:stream/promises";
 import type { Worker } from "node:worker_threads";
+import { createGzip } from "node:zlib";
 import { coerceErrorMessage as errorMessage } from "./error-format.mts";
 import {
   GATEWAY_CPU_SAMPLE_INTERVAL_MICROS,
   GATEWAY_HEAP_SAMPLE_INTERVAL,
   type GatewayProfileCommand,
+  type GatewayWorkerResourceSnapshot,
 } from "./gateway-bench-profile.ts";
 
 type WorkerTarget = { sessionId: string; inspectorWorkerId: string; threadId?: number };
@@ -161,6 +164,74 @@ export class GatewayBenchWorkerProfiler {
     capture.timer.unref();
   }
 
+  async sampleResources(options: {
+    collectGarbage?: boolean;
+    snapshotPathPrefix?: string;
+  }): Promise<GatewayWorkerResourceSnapshot[]> {
+    // Resource captures run in the source-aware benchmark launcher. Ordinary
+    // native-only CPU/allocation profiling keeps its existing import footprint.
+    const { sampleTrackedWorkerMemory } = await import("../../src/infra/worker-cpu.ts");
+    sampleTrackedWorkerMemory();
+    const workers = [...this.workers]
+      .filter((worker) => worker.threadId !== -1)
+      .map((worker) => ({ worker, threadId: worker.threadId }));
+    const gcErrors = new Map<number, string>();
+    if (options.collectGarbage) {
+      this.enabled ??= this.inspector.post("NodeWorker.enable", { waitForDebuggerOnStart: false });
+      await this.enabled;
+      const targets = new Map(
+        [...this.targets.values()].map((target) => [target.threadId, target]),
+      );
+      await Promise.all(
+        workers.map(async ({ threadId }) => {
+          try {
+            const target = targets.get(threadId);
+            if (!target) {
+              throw new Error("Worker inspector target is unavailable");
+            }
+            await this.post(target, "HeapProfiler.collectGarbage");
+          } catch (error) {
+            gcErrors.set(threadId, errorMessage(error));
+          }
+        }),
+      );
+    }
+    const samples = await this.sampleWorkers(workers);
+    const memory = sampleTrackedWorkerMemory();
+    const metadata = new Map(memory.workerHeaps.map((entry) => [entry.threadId, entry]));
+    const missing = new Map(memory.workerMemoryMissing.map((entry) => [entry.threadId, entry]));
+    const resources: GatewayWorkerResourceSnapshot[] = samples.map((sample) => {
+      const entry = metadata.get(sample.threadId);
+      return Object.assign(sample, {
+        script: entry?.script ?? missing.get(sample.threadId)?.script ?? "other",
+        workerSlot: entry?.workerSlot,
+        arrayBuffers: entry?.arrayBuffers,
+        heapSpaces: entry?.heapSpaces,
+        retainedData: entry?.retainedData,
+        sampleAgeMs: entry?.sampleAgeMs,
+        gcError: gcErrors.get(sample.threadId),
+      });
+    });
+    if (options.snapshotPathPrefix) {
+      // Heap snapshots can be large; never write more than one isolate at a time.
+      for (const [index, { worker }] of workers.entries()) {
+        const resource = resources[index]!;
+        const snapshotPath = `${options.snapshotPathPrefix}.worker-${resource.threadId}.heapsnapshot.gz`;
+        try {
+          await pipeline(
+            await worker.getHeapSnapshot(),
+            createGzip(),
+            createWriteStream(snapshotPath, { mode: 0o600 }),
+          );
+          resource.snapshotPath = snapshotPath;
+        } catch (error) {
+          resource.snapshotError = errorMessage(error);
+        }
+      }
+    }
+    return resources;
+  }
+
   private record(target: WorkerTarget, capture: Capture): void {
     const recording: WorkerRecording = {
       target,
@@ -194,23 +265,28 @@ export class GatewayBenchWorkerProfiler {
     })();
   }
 
+  private async sampleWorkers(
+    workers = [...this.workers].map((worker) => ({ worker, threadId: worker.threadId })),
+  ): Promise<WorkerSample[]> {
+    return await Promise.all(
+      workers.map(async ({ worker, threadId }): Promise<WorkerSample> => {
+        try {
+          const [cpu, heap] = await Promise.all([worker.cpuUsage(), worker.getHeapStatistics()]);
+          return { threadId, cpu, heap };
+        } catch (error) {
+          return { threadId, error: errorMessage(error) };
+        }
+      }),
+    );
+  }
+
   private sample(capture: Capture): Promise<void> {
     return (capture.polling ??= (async () => {
       const at = performance.now();
       const memory = process.memoryUsage();
       const processCpu = process.cpuUsage();
       const mainThreadCpu = process.threadCpuUsage();
-      const workers = await Promise.all(
-        [...this.workers].map(async (worker): Promise<WorkerSample> => {
-          const threadId = worker.threadId;
-          try {
-            const [cpu, heap] = await Promise.all([worker.cpuUsage(), worker.getHeapStatistics()]);
-            return { threadId, cpu, heap };
-          } catch (error) {
-            return { threadId, error: errorMessage(error) };
-          }
-        }),
-      );
+      const workers = await this.sampleWorkers();
       capture.samples.push({ at, memory, processCpu, mainThreadCpu, workers });
     })().finally(() => {
       capture.polling = undefined;

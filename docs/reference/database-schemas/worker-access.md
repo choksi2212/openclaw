@@ -6922,6 +6922,11 @@ before choosing their lane. The worker retains physical identity, schema,
 quarantine, and caller authority checks; cold reads still serialize with first
 creation.
 
+Historical-window and unbound history readers validate canonical session metadata
+and participants without loading saved skills, system-prompt, or diff snapshots.
+Those payloads do not contribute to history admission; the requested transcript
+and its reader snapshot remain unchanged.
+
 Worker-owned retirement cleanup borrows its retained executor instead of acquiring
 a native read candidate. The exact cleanup scope rechecks host liveness, while
 worker grants keep the durable journal and lease checks. Ordinary cold reads keep

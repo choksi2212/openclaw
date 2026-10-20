@@ -89,6 +89,32 @@ async function withHistory(
   });
 }
 
+it("validates history metadata without reading saved prompt snapshots", async () => {
+  await withHistory(async ({ target, database, readRecent }) => {
+    await replaceSessionEntry(
+      { ...target.transcript, storePath: target.database.path },
+      {
+        sessionId: target.transcript.sessionId,
+        updatedAt: 2,
+        skillsSnapshot: { prompt: "saved skill prompt ".repeat(32_768), skills: [] },
+      },
+    );
+    const observed = observeSqliteReadSql(Object.getPrototypeOf(database.db.prepare("SELECT 1")));
+    try {
+      const page = await readRecent();
+      expectMessageIds(page.messages, ["requested-message"]);
+      expect(page.messages[0]).toMatchObject({ content: "Requested history" });
+      expect(
+        observed.queries.filter(
+          (sql) => sql.includes('from "session_entry_snapshots"') && sql.includes('"value_json"'),
+        ),
+      ).toEqual([]);
+    } finally {
+      observed.restore();
+    }
+  });
+});
+
 it("reuses complete accounting facts and reloads them after a transcript write", async () => {
   await withHistory(async ({ target, database, reader }) => {
     const identity = readOpenClawAgentDatabaseIdentity(database);
@@ -291,7 +317,7 @@ it.each(["cold", "warm", "policy", "receipt"] as const)(
           const statement = prepare(sql);
           if (
             selectedInTransaction === undefined &&
-            isSessionNodePayloadSelect(sql) &&
+            (isSessionNodePayloadSelect(sql) || sql.includes('"entry_json"')) &&
             / from "session_nodes" where "session_key" = /i.test(sql)
           ) {
             selectedInTransaction = connection.isTransaction;

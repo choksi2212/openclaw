@@ -113,7 +113,7 @@ export function createReadonlySessionHistoryReader(
               entryValidationKey,
             )
           ) {
-            readSessionEntryRow(database, entryValidationKey);
+            readSessionEntryRow(database, entryValidationKey, "list");
           }
           return read(database);
         }),

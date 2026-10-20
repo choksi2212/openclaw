@@ -107,7 +107,13 @@ if (isMainThread) {
           }
           await inspector.post("HeapProfiler.collectGarbage");
         }
-        const resources = message.initial ? initialResources : sampleResources();
+        const resources = message.initial ? { ...initialResources } : sampleResources();
+        if (message.includeWorkers || message.workerSnapshotPathPrefix) {
+          resources.workers = await workers.sampleResources({
+            collectGarbage: message.collectGarbage,
+            snapshotPathPrefix: message.workerSnapshotPathPrefix,
+          });
+        }
         if (message.snapshotPath) {
           writeHeapSnapshot(message.snapshotPath);
         }

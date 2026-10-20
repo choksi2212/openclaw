@@ -538,8 +538,21 @@ stdout-only GC log is parsed after the owned Gateway exits and the log is flushe
 excluding workers and GC outside the capture. CPU totals remain available.
 Allocation mode waits at `--start-at` before starting capture, excluding barrier
 idle time; first-dispatch skew includes profiler setup. CPU mode retains its
-pre-barrier profile start. Compare matching modes and shapes. Workers, external
-buffers, and controller allocations are outside the main-isolate estimate.
+pre-barrier profile start. Compare matching modes and shapes. External buffers and controller allocations are outside the main-isolate estimate;
+worker profiles are recorded separately.
+
+For history-admission allocation comparisons, seed the history/diff fixture with
+`--historical --entry-snapshot-kib 2048`. This retains its populated transcript,
+then advances the canonical entry to a new session generation with a saved skills
+snapshot. `--scenario history-default` reads the old generation through the real
+`chat.history` RPC. The seed records deterministic transcript and prompt hashes;
+requests must retain identical message hashes across warmup and measurement.
+The measurement inherits seed options and rejects explicitly conflicting values.
+Add `--allocations` for main and worker allocation profiles, with the existing CPU
+counters and per-request timings. Run allocation and ordinary latency comparisons
+separately with matching settings on both sides. This case exercises historical
+and unbound validation, not the current-session shortcut that already carries its
+prepared entry. The script's default workload remains unchanged.
 
 ## Measure transcript broadcast fanout
 
@@ -852,6 +865,29 @@ changes alongside raw sample trends; compare the same session-reset phase.
 The soak preserves explicitly configured fixture plugin entries; prepare any
 synthetic diagnostic listener fixture separately and record its version. It
 does not install production-only listeners or copy their operator state.
+
+Add `--worker-memory --idle-duration-ms 360000` to sample each direct worker's
+native heap and cumulative CPU counters alongside the main isolate. This also
+reads `chat.history` and `models.list` after each completed cohort and records
+their individual latencies in `workerRpcLatencies`; concurrent `sessions.list`
+polls retain their existing timings. Workers' retained-data census and heap-space
+metadata come from the diagnostic owner and include their sample age. Native
+heap/CPU counters are sampled afresh. Nested workers remain outside this census.
+Per-script Prometheus heap values sum all isolates of that script: compare the
+worker count and individual thread IDs before attributing a large script total
+to one retained cache. The raw worker/GC metric samples accompany the JSON report.
+
+The idle phase closes viewers and submits no more RPCs or turns. Natural memory
+samples continue before a final explicit collection of the main and worker
+isolates. Initial and final forced collections are marked in the report; worker
+collection or retirement errors remain visible per isolate. Use
+`--worker-snapshots` to write final worker snapshots sequentially as compressed
+`.heapsnapshot.gz` files, plus `snapshot-resources.json` mapping them to script
+and thread identity. This implies `--worker-memory`; it does not write a main
+heap snapshot. Capture happens after measured traffic and idle sampling, since
+snapshot collection itself pauses the isolate and forces GC. Decompress an
+individual snapshot for retainer analysis; do not materialize a whole fleet of
+uncompressed snapshots on a production-shared filesystem.
 
 To start an existing fixture without regenerating it, set `HOME` and
 `OPENCLAW_HOME` to `<state-dir>/home`, `OPENCLAW_STATE_DIR` to `<state-dir>`,

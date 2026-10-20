@@ -5,6 +5,7 @@ import type { HeapProfiler, Profiler } from "node:inspector";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { expect, it, onTestFinished } from "vitest";
 import {
   controlGatewayProfile,
@@ -154,6 +155,89 @@ it.each(["exit", "disconnect"])("rejects a CPU sample when the child %ss", async
     expect(child.listenerCount(event)).toBe(0);
   }
 });
+
+it("captures live worker resources and a valid snapshot, then removes retired workers", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "gateway-worker-resources-"));
+  const workerPath = path.join(directory, "session-transcript.worker.mjs");
+  const memoryUrl = new URL("../../src/infra/worker-memory.ts", import.meta.url).href;
+  const workerCpuUrl = new URL("../../src/infra/worker-cpu.ts", import.meta.url).href;
+  await writeFile(
+    workerPath,
+    `import { parentPort } from 'node:worker_threads';
+     import { serveWorkerMemorySamples } from ${JSON.stringify(memoryUrl)};
+     const rows = Array.from({ length: 128 }, (_, i) => ({ i, marker: 'worker-footprint-retained-marker' }));
+     serveWorkerMemorySamples(parentPort, () => [{
+       structure: 'catalog-source', entries: rows.length, approximateBytes: rows.length * 32,
+     }]);
+     parentPort.on('message', () => parentPort.postMessage(rows.length));`,
+  );
+  const { child, stderr } = spawnFixture(
+    [
+      "--import",
+      fileURLToPath(new URL("../../scripts/tsx.mjs", import.meta.url)),
+      "--input-type=module",
+      "-e",
+      `import { once } from 'node:events';
+       await import(${JSON.stringify(preloadUrl)});
+       const { createCpuTrackedWorker, receiveWorkerMemoryPort } = await import(${JSON.stringify(workerCpuUrl)});
+       process.channel.ref();
+       const worker = createCpuTrackedWorker(${JSON.stringify(workerPath)}, {
+         execArgv: ['--import', ${JSON.stringify(new URL("../../scripts/tsx.mjs", import.meta.url).href)}],
+       });
+       const [memory] = await once(worker, 'message');
+       const sampled = once(memory.port, 'message');
+       receiveWorkerMemoryPort(worker, memory);
+       await sampled;
+       process.on('message', async message => {
+         if (message.retire) {
+           await worker.terminate();
+           process.send({ retired: true });
+         }
+       });
+       process.send({ ready: true });`,
+    ],
+    directory,
+  );
+  await waitMessage(child, "ready");
+  expect((await readGatewayResources(child)).workers).toBeUndefined();
+  const captured = await readGatewayResources(child, {
+    includeWorkers: true,
+    collectGarbage: true,
+    workerSnapshotPathPrefix: path.join(directory, "retained"),
+  });
+  const owned = captured.workers?.filter((row) => row.script === "session-transcript.worker.js");
+  expect(owned, stderr()).toHaveLength(1);
+  const worker = owned?.[0];
+  if (!worker) {
+    throw new Error("Owned worker is missing from resource capture");
+  }
+  expect(worker).toMatchObject({
+    threadId: expect.any(Number),
+    script: "session-transcript.worker.js",
+    retainedData: [{ structure: "catalog-source", entries: 128, approximateBytes: 4096 }],
+    sampleAgeMs: expect.any(Number),
+  });
+  expect([worker.error, worker.gcError, worker.snapshotError]).toEqual([
+    undefined,
+    undefined,
+    undefined,
+  ]);
+  expect(worker.heap?.used_heap_size).toBeGreaterThan(0);
+  expect(worker.cpu?.user).toBeGreaterThanOrEqual(0);
+  expect(worker.cpu?.system).toBeGreaterThanOrEqual(0);
+  const snapshot: {
+    snapshot: { meta: { node_fields: string[] } };
+    nodes: number[];
+    strings: string[];
+  } = JSON.parse(gunzipSync(await readFile(worker.snapshotPath!)).toString("utf8"));
+  expect(snapshot.snapshot.meta.node_fields).toContain("name");
+  expect(snapshot.nodes.length).toBeGreaterThan(0);
+  expect(snapshot.strings).toContain("worker-footprint-retained-marker");
+  expect(await sendMessage(child, { retire: true })).toEqual({ retired: true });
+  expect((await readGatewayResources(child, { includeWorkers: true })).workers).not.toEqual(
+    expect.arrayContaining([expect.objectContaining({ threadId: worker.threadId })]),
+  );
+}, 30_000);
 
 it.each([false, true])(
   "settles startup profiling across builtin initialization with unknown identity=%s",
