@@ -1,9 +1,11 @@
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { stringify } from "yaml";
 import type {
   ClawDraftDocument,
   ClawDraftReviewChoices,
   ClawDraftReviewItem,
 } from "../../packages/gateway-protocol/src/index.js";
+import { CLAW_BOOTSTRAP_FILE_NAMES } from "./manifest-contract.js";
 import { ClawProjectError } from "./project.js";
 import { parseClawMarkdown } from "./reader.js";
 import { parseClawManifest } from "./schema.js";
@@ -23,14 +25,17 @@ function profileWithoutExcludedPlugins(content: string, refs: ReadonlySet<string
     return content;
   }
   const parsed = parseClawYaml(content, "profiles/openclaw.yml", "profile");
-  if (!parsed.ok || !parsed.value || typeof parsed.value !== "object") {
+  if (!parsed.ok || !isRecord(parsed.value)) {
     return content;
   }
-  const profile = parsed.value as { extensions?: Array<{ ref: string }> };
+  const profile = parsed.value;
   if (!Array.isArray(profile.extensions)) {
     return content;
   }
-  profile.extensions = profile.extensions.filter((extension) => !refs.has(extension.ref));
+  profile.extensions = profile.extensions.filter(
+    (extension) =>
+      !isRecord(extension) || typeof extension.ref !== "string" || !refs.has(extension.ref),
+  );
   return stringify(profile);
 }
 
@@ -97,11 +102,10 @@ export function applyClawDraftChoices(
   manifest.workspace.files = manifest.workspace.files.filter(
     (entry) => !excluded.has(`file:${entry.source}`),
   );
-  for (const [target, entry] of Object.entries(manifest.workspace.bootstrapFiles)) {
+  for (const target of CLAW_BOOTSTRAP_FILE_NAMES) {
+    const entry = manifest.workspace.bootstrapFiles[target];
     if (entry && excluded.has(`file:${entry.source}`)) {
-      delete manifest.workspace.bootstrapFiles[
-        target as keyof typeof manifest.workspace.bootstrapFiles
-      ];
+      delete manifest.workspace.bootstrapFiles[target];
     }
   }
   manifest.packages = manifest.packages.filter(
@@ -116,13 +120,17 @@ export function applyClawDraftChoices(
   const removedPluginRefs = new Set(
     items.filter((item) => item.kind === "plugin" && !item.included).map((item) => item.label),
   );
-  const files = proposal.files
-    .filter((file) => !excluded.has(`file:${file.path}`))
-    .map((file) =>
+  const files = [];
+  for (const file of proposal.files) {
+    if (excluded.has(`file:${file.path}`)) {
+      continue;
+    }
+    files.push(
       file.path === "profiles/openclaw.yml"
         ? { ...file, content: profileWithoutExcludedPlugins(file.content, removedPluginRefs) }
         : file,
     );
+  }
   return {
     proposal: {
       ...proposal,
